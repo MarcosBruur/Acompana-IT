@@ -1,0 +1,20 @@
+# Python / uv
+backend/.venv/
+backend/.env
+backend/.pytest_cache/
+backend/.ruff_cache/
+**/__pycache__/
+*.py[cod]
+
+# Node / Vite
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# Archivos de usuario y respaldos
+uploads/
+*.pdf
+*.dump
+*.sql.gz
+.DS_Store
