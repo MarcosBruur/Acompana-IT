@@ -6,7 +6,11 @@ import {
   Route,
   Routes,
   useLocation,
+  Navigate,
+  useNavigate,
 } from 'react-router-dom'
+import { AuthProvider } from './features/auth'
+import { useAuth } from './features/auth-context'
 import { modules } from './features/modules'
 import { Asset, PreviewNotice, type DesignScreen } from './components/Design'
 import { Dashboard } from './pages/Dashboard'
@@ -15,10 +19,13 @@ import { ResumePage } from './pages/ResumePage'
 import { VacancyPage, AnalysisPage } from './pages/VacancyPage'
 import { InterviewPage } from './pages/InterviewPage'
 import { ModulePage } from './pages/ModulePage'
+import { ChangePasswordPage } from './pages/ChangePasswordPage'
 import './App.css'
 
 function Layout() {
   const { pathname } = useLocation()
+  const navigate = useNavigate()
+  const { candidate, logout } = useAuth()
   const screen: DesignScreen =
     pathname === '/curriculum'
       ? 'resume'
@@ -53,10 +60,15 @@ function Layout() {
             </NavLink>
           ))}
         </nav>
-        <Link className="logout" to="/sesion">
-          <Asset screen={screen} name="imgLogOut" />
-          Cerrar sesión
-        </Link>
+        {candidate ? (
+          <button className="logout" type="button" onClick={() => {
+            void logout().then(() => navigate('/')).catch(() => window.alert('No se pudo cerrar la sesión. Intentá de nuevo.'))
+          }}>
+            <Asset screen={screen} name="imgLogOut" />Cerrar sesión
+          </button>
+        ) : (
+          <Link className="logout" to="/sesion"><Asset screen={screen} name="imgLogOut" />Iniciar sesión</Link>
+        )}
       </aside>
       <main id="contenido" className="content">
         <Outlet />
@@ -66,21 +78,38 @@ function Layout() {
   )
 }
 
+function RequireAccount({ children }: { children: React.ReactNode }) {
+  const { candidate, loading } = useAuth()
+  const location = useLocation()
+  if (loading) return <p role="status">Cargando sesión…</p>
+  if (!candidate) return <Navigate to="/sesion" state={{ from: location.pathname }} replace />
+  if (candidate.password_expired) return <Navigate to="/cambiar-contrasena" state={{ from: location.pathname }} replace />
+  return children
+}
+
+function RequireRenewal() {
+  const { candidate, loading } = useAuth()
+  if (loading) return <p role="status">Cargando sesión…</p>
+  if (!candidate) return <Navigate to="/sesion" replace />
+  return <ChangePasswordPage />
+}
+
 function App() {
   return (
     <BrowserRouter>
-      <Routes>
+      <AuthProvider><Routes>
         <Route path="/sesion" element={<AuthPage />} />
         <Route path="/login" element={<AuthPage />} />
         <Route path="/registro" element={<AuthPage register />} />
         <Route path="/register" element={<AuthPage register />} />
+        <Route path="/cambiar-contrasena" element={<RequireRenewal />} />
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="/curriculum" element={<ResumePage />} />
           <Route path="/vacantes" element={<VacancyPage />} />
           <Route path="/vacantes/nueva" element={<VacancyPage />} />
           <Route path="/vacantes/ejemplo/analisis" element={<AnalysisPage />} />
-          <Route path="/entrevistas" element={<InterviewPage />} />
+          <Route path="/entrevistas" element={<RequireAccount><InterviewPage /></RequireAccount>} />
           {modules
             .filter((module) =>
               ['/comparaciones', '/aprendizaje'].includes(module.path),
@@ -89,7 +118,7 @@ function App() {
               <Route
                 key={module.path}
                 path={module.path}
-                element={<ModulePage module={module} />}
+                element={module.path === '/comparaciones' ? <RequireAccount><ModulePage module={module} /></RequireAccount> : <ModulePage module={module} />}
               />
             ))}
           <Route
@@ -102,7 +131,7 @@ function App() {
             }
           />
         </Route>
-      </Routes>
+      </Routes></AuthProvider>
     </BrowserRouter>
   )
 }

@@ -1,47 +1,124 @@
-import { useState, type FormEvent } from 'react'
-import { Link } from 'react-router-dom'
-import { Asset, Modal, PreviewNotice } from '../components/Design'
+import { useEffect, useState, type FormEvent } from 'react'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import { Asset } from '../components/Design'
+import { FieldError } from '../components/FieldError'
+import { useAuth } from '../features/auth-context'
+import { required, validateConfirmation, validateEmail, validatePassword } from '../features/auth-validation'
+import { AuthRequestError, authRequest, googleLoginUrl, type Candidate } from '../services/auth'
+
+type FieldName = 'name' | 'surname' | 'email' | 'password' | 'confirm'
+type Values = Record<FieldName, string>
+type Errors = Partial<Record<FieldName, string>>
+const initialValues: Values = { name: '', surname: '', email: '', password: '', confirm: '' }
+
+function validateField(name: FieldName, values: Values, register: boolean): string | undefined {
+  const value = values[name]
+  if (name === 'email') return validateEmail(value)
+  if (name === 'password') return register ? validatePassword(value) : required(value)
+  if (name === 'confirm') return validateConfirmation(value, values.password)
+  if (required(value)) return required(value)
+  if (value.trim().length > 100) return 'Ingresá hasta 100 caracteres.'
+}
 
 export function AuthPage({ register = false }: { register?: boolean }) {
   const screen = register ? 'registration' : 'login'
   const [visible, setVisible] = useState<Record<string, boolean>>({})
-  const [message, setMessage] = useState('')
-  function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    const form = new FormData(event.currentTarget)
-    if (register && form.get('password') !== form.get('confirm')) {
-      setMessage('Las contraseñas deben coincidir.')
-      return
+  const [values, setValues] = useState<Values>(initialValues)
+  const [errors, setErrors] = useState<Errors>({})
+  const [formError, setFormError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [googleAvailable, setGoogleAvailable] = useState(false)
+  const { candidate, loading, setCandidate } = useAuth()
+  const navigate = useNavigate()
+  const location = useLocation()
+  const [params, setParams] = useSearchParams()
+  const destination = (location.state as { from?: string } | null)?.from ?? '/'
+  const googleError = params.get('google_error')
+
+  function updateField(name: FieldName, value: string) {
+    if (name === 'email' && googleError === 'linked') {
+      setParams((current) => {
+        const next = new URLSearchParams(current)
+        next.delete('google_error')
+        return next
+      }, { replace: true })
     }
-    setMessage(
-      register
-        ? 'El formulario es válido. El registro de cuentas estará disponible cuando se implemente la autenticación.'
-        : 'El inicio de sesión estará disponible cuando se implemente la autenticación. Podés recorrer las pantallas desde «Explorar maqueta».',
-    )
+    const next = { ...values, [name]: value }
+    setValues(next)
+    setFormError('')
+    setErrors((current) => ({
+      ...current,
+      [name]: current[name] ? validateField(name, next, register) : undefined,
+      ...(name === 'password' && (next.confirm || current.confirm)
+        ? { confirm: validateField('confirm', next, register) }
+        : {}),
+    }))
+  }
+
+  useEffect(() => {
+    if (params.has('google_error')) sessionStorage.removeItem('auth_return_to')
+    authRequest<{ available: boolean }>('/google/available')
+      .then(({ available }) => setGoogleAvailable(available))
+      .catch(() => setGoogleAvailable(false))
+  }, [params])
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const fields: FieldName[] = register
+      ? ['name', 'surname', 'email', 'password', 'confirm']
+      : ['email', 'password']
+    const nextErrors: Errors = {}
+    for (const name of fields) nextErrors[name] = validateField(name, values, register)
+    setErrors(nextErrors)
+    if (Object.values(nextErrors).some(Boolean)) return
+    setBusy(true)
+    setFormError('')
+    try {
+      const result = await authRequest<Candidate>(register ? '/register' : '/login', {
+        method: 'POST',
+        body: JSON.stringify(register ? {
+          first_name: values.name.trim(), last_name: values.surname.trim(),
+          email: values.email.trim(), password: values.password,
+          confirm_password: values.confirm,
+        } : { email: values.email.trim(), password: values.password }),
+      })
+      setCandidate(result)
+      sessionStorage.removeItem('auth_return_to')
+      navigate(result.password_expired ? '/cambiar-contrasena' : destination, { replace: true, state: { from: destination } })
+    } catch (error) {
+      if (error instanceof AuthRequestError) {
+        const serverFields: Errors = {}
+        const names: Record<string, FieldName> = {
+          first_name: 'name', last_name: 'surname', email: 'email',
+          password: 'password', confirm_password: 'confirm',
+        }
+        for (const [field, message] of Object.entries(error.fieldErrors)) {
+          if (names[field]) serverFields[names[field]] = message
+        }
+        if (error.status === 409) serverFields.email = error.message
+        if (error.status === 401) serverFields.password = error.message
+        setErrors(serverFields)
+        if (!Object.values(serverFields).some(Boolean)) setFormError(error.message)
+      } else {
+        setFormError('No se pudo conectar. Intentá de nuevo.')
+      }
+    } finally {
+      setBusy(false)
+    }
   }
   function field(
-    name: string,
+    name: FieldName,
     label: string,
     placeholder: string,
     password = false,
   ) {
+    const error = errors[name] || (name === 'email' && googleError === 'linked'
+      ? 'Este correo ya tiene una cuenta. Iniciá sesión con tu contraseña.' : undefined)
+    const errorId = `auth-${name}-error`
     return (
       <div className="field" key={name}>
         <span className="field-label">
           <label htmlFor={`auth-${name}`}>{label}</label>
-          {name === 'password' && !register && (
-            <button
-              type="button"
-              className="text-button forgot"
-              onClick={() =>
-                setMessage(
-                  'La recuperación de contraseña está pendiente de implementación.',
-                )
-              }
-            >
-              ¿Olvidé mi contraseña?
-            </button>
-          )}
         </span>
         <span className="input-wrapper">
           <Asset
@@ -60,6 +137,11 @@ export function AuthPage({ register = false }: { register?: boolean }) {
             }
             placeholder={placeholder}
             required
+            value={values[name]}
+            onChange={(event) => updateField(name, event.target.value)}
+            onBlur={() => setErrors((current) => ({ ...current, [name]: validateField(name, values, register) }))}
+            aria-invalid={Boolean(error)}
+            aria-describedby={error ? errorId : undefined}
             autoComplete={
               name === 'email'
                 ? 'email'
@@ -70,17 +152,6 @@ export function AuthPage({ register = false }: { register?: boolean }) {
                   : name === 'name'
                     ? 'given-name'
                     : 'family-name'
-            }
-            minLength={password && register ? 8 : undefined}
-            pattern={
-              password && register
-                ? '(?=.*[A-Z])(?=.*[0-9])(?=.*[^A-Za-z0-9]).{8,}'
-                : undefined
-            }
-            title={
-              password && register
-                ? 'Mínimo 8 caracteres, una mayúscula, un número y un carácter especial.'
-                : undefined
             }
           />
           {password && (
@@ -100,6 +171,7 @@ export function AuthPage({ register = false }: { register?: boolean }) {
             </button>
           )}
         </span>
+        <FieldError id={errorId} message={error} />
       </div>
     )
   }
@@ -123,7 +195,7 @@ export function AuthPage({ register = false }: { register?: boolean }) {
           </div>
         </section>
         <main className="auth-panel">
-          <form className="auth-form" onSubmit={submit}>
+          <form className="auth-form" onSubmit={submit} noValidate>
             <header>
               <h2>{register ? 'Crear cuenta' : 'Iniciar sesión'}</h2>
               <p>
@@ -160,44 +232,11 @@ export function AuthPage({ register = false }: { register?: boolean }) {
                 </>
               )}
             </div>
-            {register && (
-              <label className="terms">
-                <input type="checkbox" required defaultChecked />
-                <span className="checkbox-art">
-                  <Asset screen="registration" name="imgCheck" />
-                </span>
-                <span>
-                  Acepto los{' '}
-                  <button
-                    type="button"
-                    className="text-button"
-                    onClick={() =>
-                      setMessage(
-                        'Los términos de servicio estarán disponibles antes de habilitar el registro.',
-                      )
-                    }
-                  >
-                    Términos de servicio
-                  </button>{' '}
-                  y la{' '}
-                  <button
-                    type="button"
-                    className="text-button"
-                    onClick={() =>
-                      setMessage(
-                        'La política de privacidad estará disponible antes de habilitar el registro.',
-                      )
-                    }
-                  >
-                    Política de privacidad
-                  </button>
-                </span>
-              </label>
-            )}
             <div className="auth-actions">
-              <button className="primary" type="submit">
-                {register ? 'Registrarse' : 'Ingresar a la plataforma'}
+              <button className="primary" type="submit" disabled={busy || loading}>
+                {busy || loading ? 'Procesando…' : register ? 'Registrarse' : 'Ingresar a la plataforma'}
               </button>
+              <FieldError id="auth-form-error" message={formError} />
               {!register && (
                 <>
                   <div className="oauth-divider">
@@ -208,35 +247,32 @@ export function AuthPage({ register = false }: { register?: boolean }) {
                   <button
                     className="google-button"
                     type="button"
-                    onClick={() =>
-                      setMessage(
-                        'El acceso con Google requiere configurar OAuth y todavía no está disponible.',
-                      )
-                    }
+                    disabled={!googleAvailable || busy || loading}
+                    onClick={() => {
+                      if (destination === '/comparaciones' || destination === '/entrevistas') sessionStorage.setItem('auth_return_to', destination)
+                      window.location.assign(googleLoginUrl())
+                    }}
                   >
                     Continuar con Google
                   </button>
+                  {!googleAvailable && <small>El acceso con Google estará disponible cuando se configuren las credenciales OAuth.</small>}
+                  <FieldError id="google-login-error" message={googleError && googleError !== 'linked' ? 'No se pudo iniciar sesión con Google. Intentá de nuevo.' : undefined} />
                 </>
               )}
             </div>
             <p className="auth-footer">
               {register ? '¿Ya tienes cuenta?' : '¿No tienes una cuenta aún?'}{' '}
-              <Link to={register ? '/sesion' : '/registro'}>
+              <Link to={register ? '/sesion' : '/registro'} state={{ from: destination }}>
                 {register ? 'Iniciar sesión' : 'Crear cuenta'}
               </Link>
             </p>
             <Link className="explore-link" to="/">
-              Explorar maqueta
+              Continuar sin cuenta
             </Link>
           </form>
         </main>
       </div>
-      <PreviewNotice />
-      {message && (
-        <Modal title="Vista previa" onClose={() => setMessage('')}>
-          <p role="status">{message}</p>
-        </Modal>
-      )}
+      {candidate && <p className="auth-signed-in">Ya iniciaste sesión como {candidate.email}. <Link to="/">Ir al inicio</Link></p>}
     </>
   )
 }

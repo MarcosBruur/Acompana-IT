@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react'
+import { useAuth } from '../features/auth-context'
 
 export type DesignScreen =
   | 'login'
@@ -33,12 +34,13 @@ export function Header({
   title: string
   screen: DesignScreen
 }) {
+  const { candidate } = useAuth()
   return (
     <header className="page-header">
       <h1>{title}</h1>
       <div className="user-pill">
         <Asset screen={screen} name="imgAvatar" />
-        <span>marcosbruur</span>
+        <span>{candidate ? candidate.first_name : 'Visitante'}</span>
       </div>
     </header>
   )
@@ -78,8 +80,7 @@ export function Modal({
 export function PreviewNotice() {
   return (
     <p className="preview-notice">
-      Vista de los mockups · Datos de ejemplo · Cuenta, análisis y voz
-      pendientes de integración.
+      Vista de los mockups · Datos de ejemplo · Análisis y voz pendientes de integración.
     </p>
   )
 }

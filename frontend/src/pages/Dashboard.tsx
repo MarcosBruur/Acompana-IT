@@ -1,7 +1,9 @@
 import { Link } from 'react-router-dom'
 import { Asset, Header } from '../components/Design'
+import { useAuth } from '../features/auth-context'
 
 export function Dashboard() {
+  const { candidate } = useAuth()
   const cards = [
     {
       title: 'Analizar vacante',
@@ -30,7 +32,7 @@ export function Dashboard() {
   ]
   return (
     <>
-      <Header title="Bienvenido, Marcos" screen="dashboard" />
+      <Header title={`Bienvenido${candidate ? `, ${candidate.first_name}` : ''}`} screen="dashboard" />
       <div className="action-cards">
         {cards.map((card, i) => (
           <article className="action-card" key={card.title}>
