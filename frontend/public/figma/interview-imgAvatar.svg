@@ -1,0 +1,6 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="avatar">
+<rect width="28" height="28" rx="14" fill="#06B6D4" fill-opacity="0.14902"/>
+<path id="user-vector" d="M22.1672 24.5V22.1667C22.1672 20.929 21.6755 19.742 20.8002 18.8668C19.925 17.9917 18.7378 17.5 17.5 17.5H10.4992C9.26141 17.5 8.07429 17.9917 7.19902 18.8668C6.32375 19.742 5.83203 20.929 5.83203 22.1667V24.5M18.6668 8.16667C18.6668 10.744 16.5773 12.8333 13.9996 12.8333C11.422 12.8333 9.33243 10.744 9.33243 8.16667C9.33243 5.58934 11.422 3.5 13.9996 3.5C16.5773 3.5 18.6668 5.58934 18.6668 8.16667Z" stroke-width="2" stroke-linecap="round" stroke="#06B6D4"/>
+</g>
+</svg>

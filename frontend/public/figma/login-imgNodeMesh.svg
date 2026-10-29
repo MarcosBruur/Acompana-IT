@@ -1,0 +1,9 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="480" height="320.966" viewBox="0 0 480 320.966" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="node-mesh">
+<path id="line-1" opacity="0.2" d="M0.12941 0.482963L270.589 72.9523" stroke="#06B6D4"/>
+<path id="line-2" opacity="0.15" d="M270.106 156.176L425.669 0.612373" stroke="#3B82F6"/>
+<circle id="node-dot-1" cx="274" cy="74.9659" r="4" fill="#06B6D4"/>
+<path id="node-dot-2" d="M161 156.966C161 159.727 158.761 161.966 156 161.966C153.239 161.966 151 159.727 151 156.966C151 154.205 153.239 151.966 156 151.966C158.761 151.966 161 154.205 161 156.966Z" fill="#3B82F6" stroke-width="2" stroke="#F8FAFC"/>
+<circle id="node-dot-3" cx="403" cy="43.9659" r="3" fill="#06B6D4"/>
+</g>
+</svg>

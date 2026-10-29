@@ -1,0 +1,7 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="56" height="56" viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="microphone button">
+<rect x="0.5" y="0.5" width="55" height="55" rx="27.5" fill="white"/>
+<rect x="0.5" y="0.5" width="55" height="55" rx="27.5" stroke="#E2E8F0"/>
+<path id="microphone-icon" d="M18 25.8182V26.9091C18 36.7273 38 36.7273 38 26.9091V25.8182M28 34.5455V40M22.2857 40H33.7143M23.7143 19.2727C23.7143 14.9091 32.2857 14.9091 32.2857 19.2727V26.9091C32.2857 31.2727 23.7143 31.2727 23.7143 26.9091V19.2727Z" stroke-width="1.7" stroke-linecap="round" stroke="#3B82F6"/>
+</g>
+</svg>

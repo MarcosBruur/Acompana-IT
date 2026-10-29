@@ -16,6 +16,8 @@ En tres terminales, desde la raíz del proyecto:
 docker compose up -d db
 ```
 
+El PostgreSQL del contenedor se publica en `127.0.0.1:5433` para no interferir con una instalación local que utilice el puerto `5432`.
+
 ```powershell
 cd backend
 uv sync
