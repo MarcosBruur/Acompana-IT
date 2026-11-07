@@ -1,14 +1,23 @@
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Asset, Header } from '../components/Design'
 import { useAuth } from '../features/auth-context'
+import { getVacancies, type VacancySummary } from '../services/vacancies'
 
 export function Dashboard() {
   const { candidate } = useAuth()
+  const [recent, setRecent] = useState<VacancySummary[]>([])
+  useEffect(() => {
+    if (!candidate || candidate.password_expired) return
+    let active = true
+    getVacancies().then((items) => { if (active) setRecent(items.slice(0, 3)) }).catch(() => {})
+    return () => { active = false }
+  }, [candidate])
   const cards = [
     {
       title: 'Analizar vacante',
       description:
-        'Pega la descripción de un puesto para evaluar tu compatibilidad instantáneamente.',
+        'Pegá la descripción de un puesto para identificar requisitos y posibles alertas de la oferta.',
       action: 'Comenzar análisis',
       icon: 'imgSearch',
       to: '/vacantes',
@@ -32,7 +41,7 @@ export function Dashboard() {
   ]
   return (
     <>
-      <Header title={`Bienvenido${candidate ? `, ${candidate.first_name}` : ''}`} screen="dashboard" />
+      <Header title={`Bienvenido${candidate ? `, ${candidate.nickname || candidate.first_name}` : ''}`} screen="dashboard" />
       <div className="action-cards">
         {cards.map((card, i) => (
           <article className="action-card" key={card.title}>
@@ -54,30 +63,27 @@ export function Dashboard() {
         <section>
           <h2 className="section-title">Vacantes analizadas recientemente</h2>
           <div className="jobs-list">
-            {[
-              'QA y testing automation Java',
-              'Analista tecnico funcional',
-              'AI Engineer entry level',
-            ].map((title, i) => (
+            {recent.map((vacancy) => (
               <Link
                 className="job-row"
-                key={title}
-                to="/vacantes/ejemplo/analisis"
+                key={vacancy.id}
+                to={`/vacantes/${vacancy.id}/analisis`}
               >
                 <div>
-                  <h3>{title}</h3>
-                  <p>Nombre de empresa</p>
+                  <h3>{vacancy.title}</h3>
+                  <p>{vacancy.company || 'Empresa no indicada'}</p>
                 </div>
                 <div className="job-match">
                   <span className="pill cyan">
-                    {[92, 84, 71][i]}% Coincidencia
+                    {vacancy.risk_percentage ?? 0}% Riesgo orientativo
                   </span>
                   <span className="muted">
-                    {['Hace 2 días', 'Hace 4 días', 'Hace 1 semana'][i]}
+                    {new Date(vacancy.created_at).toLocaleDateString('es-AR')}
                   </span>
                 </div>
               </Link>
             ))}
+            {!recent.length && <p>Los análisis que guardes aparecerán aquí. <Link to="/vacantes">Analizar una vacante</Link></p>}
           </div>
         </section>
         <section className="interviews-card">

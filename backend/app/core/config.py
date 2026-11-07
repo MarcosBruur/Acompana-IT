@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,6 +10,9 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     google_client_id: str | None = None
     google_client_secret: str | None = None
+    media_dir: Path = Path(__file__).resolve().parents[1] / "media"
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-4.1-mini"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

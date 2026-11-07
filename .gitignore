@@ -14,6 +14,7 @@ frontend/.env.local
 
 # Archivos de usuario y respaldos
 uploads/
+backend/app/media/
 *.pdf
 *.dump
 *.sql.gz

@@ -16,7 +16,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setCandidate(result)
         const destination = sessionStorage.getItem('auth_return_to')
         sessionStorage.removeItem('auth_return_to')
-        if (destination === '/comparaciones' || destination === '/entrevistas') navigate(destination, { replace: true })
+        if (destination === '/comparaciones' || destination === '/entrevistas' || destination === '/perfil') navigate(destination, { replace: true })
       })
       .catch(() => { if (active) setCandidate(null) })
       .finally(() => { if (active) setLoading(false) })

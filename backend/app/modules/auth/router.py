@@ -96,6 +96,8 @@ class CandidateOutput(BaseModel):
     email: str
     first_name: str
     last_name: str
+    nickname: str | None
+    avatar_url: str | None
     password_expired: bool
     role: str = "candidato"
 
@@ -117,6 +119,8 @@ def public_candidate(candidate: Candidate) -> CandidateOutput:
     return CandidateOutput(
         id=candidate.id, email=candidate.email, first_name=candidate.first_name,
         last_name=candidate.last_name, password_expired=expired(candidate),
+        nickname=candidate.nickname,
+        avatar_url=f"/api/v1/profile/avatar?version={candidate.avatar_key.rsplit('/', 1)[-1]}" if candidate.avatar_key else None,
     )
 
 

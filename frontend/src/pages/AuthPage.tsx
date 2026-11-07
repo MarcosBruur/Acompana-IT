@@ -249,7 +249,7 @@ export function AuthPage({ register = false }: { register?: boolean }) {
                     type="button"
                     disabled={!googleAvailable || busy || loading}
                     onClick={() => {
-                      if (destination === '/comparaciones' || destination === '/entrevistas') sessionStorage.setItem('auth_return_to', destination)
+                       if (destination === '/comparaciones' || destination === '/entrevistas' || destination === '/perfil') sessionStorage.setItem('auth_return_to', destination)
                       window.location.assign(googleLoginUrl())
                     }}
                   >

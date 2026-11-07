@@ -3,7 +3,18 @@
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, ForeignKey, Identity, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Identity,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -17,6 +28,8 @@ class Candidate(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     first_name: Mapped[str] = mapped_column(String(100))
     last_name: Mapped[str] = mapped_column(String(100))
+    nickname: Mapped[str | None] = mapped_column(String(100))
+    avatar_key: Mapped[str | None] = mapped_column(String(500))
     password_hash: Mapped[str | None] = mapped_column(String(255))
     password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -45,11 +58,14 @@ class GoogleIdentity(Base):
 
 class Resume(Base):
     __tablename__ = "resumes"
+    __table_args__ = (Index("uq_resumes_primary_candidate", "candidate_id", unique=True,
+                            postgresql_where=text("is_primary"), sqlite_where=text("is_primary")),)
 
     id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
     candidate_id: Mapped[int] = mapped_column(ForeignKey("candidates.id", ondelete="CASCADE"))
     filename: Mapped[str] = mapped_column(String(255))
     storage_key: Mapped[str] = mapped_column(String(500))
+    is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     extracted_text: Mapped[str | None] = mapped_column(Text)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     candidate: Mapped[Candidate] = relationship(back_populates="resumes")
@@ -74,8 +90,10 @@ class VacancyAnalysis(Base):
     id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
     vacancy_id: Mapped[int] = mapped_column(ForeignKey("vacancies.id", ondelete="CASCADE"), unique=True)
     seniority: Mapped[str | None] = mapped_column(String(50))
+    experience_required: Mapped[str | None] = mapped_column(String(100))
     required_skills: Mapped[list] = mapped_column(JSONB, default=list)
     technologies: Mapped[list] = mapped_column(JSONB, default=list)
+    responsibilities: Mapped[list] = mapped_column(JSONB, default=list)
     inconsistencies: Mapped[list] = mapped_column(JSONB, default=list)
     risk_signals: Mapped[list] = mapped_column(JSONB, default=list)
     risk_percentage: Mapped[int | None] = mapped_column(Integer)

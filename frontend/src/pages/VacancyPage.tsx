@@ -1,172 +1,95 @@
-import { useState, type FormEvent } from 'react'
-import { Link } from 'react-router-dom'
-import { Header, Modal } from '../components/Design'
+import { useEffect, useState, type FormEvent } from 'react'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { Header } from '../components/Design'
+import { useAuth } from '../features/auth-context'
+import { analyzeVacancy, getTransientAnalysis, getVacancies, getVacancy, setTransientAnalysis, type Finding, type VacancyResult, type VacancySummary } from '../services/vacancies'
 
 export function VacancyPage() {
-  const [message, setMessage] = useState(false)
-  function submit(event: FormEvent<HTMLFormElement>) {
+  const { candidate } = useAuth()
+  const navigate = useNavigate()
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [history, setHistory] = useState<VacancySummary[]>([])
+  useEffect(() => { if (candidate && !candidate.password_expired) getVacancies().then(setHistory).catch(() => setError('No se pudo consultar el historial.')) }, [candidate])
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    setMessage(true)
+    const form = new FormData(event.currentTarget)
+    setError(''); setBusy(true)
+    try {
+      const result = await analyzeVacancy({
+        title: String(form.get('title') ?? '').trim(),
+        company: String(form.get('company') ?? '').trim() || null,
+        description: String(form.get('description') ?? '').trim(),
+      })
+      if (result.id) navigate(`/vacantes/${result.id}/analisis`, { state: { result } })
+      else { setTransientAnalysis(result); navigate('/vacantes/analisis') }
+    } catch (reason) { setError(reason instanceof Error && reason.name !== 'TimeoutError' ? reason.message : 'El análisis tardó demasiado. Volvé a intentarlo.') }
+    finally { setBusy(false) }
   }
-  return (
-    <>
-      <Header title="Analizar nueva vacante" screen="vacancy" />
-      <div className="vacancy-content">
-        <p className="intro">
-          Pegá la oferta laboral para conocer qué busca la empresa antes de
-          postularte.
-        </p>
-        <form className="panel vacancy-form" onSubmit={submit}>
-          <h2>Datos de la vacante</h2>
-          <div className="two-fields">
-            <label className="field">
-              Título de la vacante
-              <input
-                name="title"
-                required
-                maxLength={200}
-                placeholder="Ej.: Desarrollador/a Frontend React"
-              />
-            </label>
-            <label className="field">
-              Empresa (opcional)
-              <input
-                name="company"
-                maxLength={200}
-                placeholder="Ej.: Nombre de la empresa"
-              />
-            </label>
-          </div>
-          <label className="field">
-            Descripción completa de la oferta
-            <textarea
-              name="description"
-              required
-              maxLength={20000}
-              placeholder="Pegá aquí la descripción completa de la vacante, incluyendo responsabilidades, requisitos y beneficios…"
-            />
-          </label>
-          <div className="analysis-explanation">
-            <strong>¿Qué vamos a analizar?</strong>
-            <p>
-              Requisitos, tecnologías, experiencia, seniority y posibles señales
-              de riesgo de la oferta.
-            </p>
-          </div>
-          <div className="form-actions">
-            <p className="helper">
-              Completá el título y la descripción para iniciar el análisis.
-            </p>
-            <button className="primary" type="submit">
-              Analizar vacante
-            </button>
-          </div>
-        </form>
-        <Link className="example-link" to="/vacantes/ejemplo/analisis">
-          Ver el análisis de ejemplo del mockup
-        </Link>
-      </div>
-      {message && (
-        <Modal
-          title="Análisis pendiente de integración"
-          onClose={() => setMessage(false)}
-        >
-          <p>
-            El formulario es válido. El servicio de análisis todavía no está
-            implementado; tu texto no se envió ni se guardó.
-          </p>
-          <Link className="primary" to="/vacantes/ejemplo/analisis">
-            Ver análisis de ejemplo
-          </Link>
-        </Modal>
-      )}
-    </>
-  )
+
+  return <>
+    <Header title="Analizar nueva vacante" screen="vacancy" />
+    <div className="vacancy-content">
+      <p className="intro">Pegá la oferta laboral para conocer qué busca la empresa antes de postularte. No se utiliza tu CV.</p>
+      <form className="panel vacancy-form" onSubmit={(event) => void submit(event)}>
+        <h2>Datos de la vacante</h2>
+        <div className="two-fields">
+          <label className="field">Título de la vacante<input name="title" required maxLength={200} placeholder="Ej.: Desarrollador/a Frontend React" /></label>
+          <label className="field">Empresa (opcional)<input name="company" maxLength={200} placeholder="Ej.: Nombre de la empresa" /></label>
+        </div>
+        <label className="field">Descripción completa de la oferta<textarea name="description" required minLength={30} maxLength={12000} placeholder="Pegá aquí la descripción completa de la vacante, incluyendo responsabilidades, requisitos y beneficios…" /></label>
+        <div className="analysis-explanation"><strong>¿Qué vamos a analizar?</strong><p>Requisitos, tecnologías, experiencia, seniority y posibles señales de riesgo de la oferta. El porcentaje de riesgo es orientativo.</p></div>
+        <p className="helper">{candidate && !candidate.password_expired ? 'El análisis quedará guardado en tu cuenta.' : 'Podés analizar sin cuenta; el resultado no se guardará.'}</p>
+        {error && <p className="field-error" role="alert">{error}</p>}
+        <div className="form-actions"><p className="helper">Completá el título y la descripción para iniciar el análisis.</p><button className="primary" type="submit" disabled={busy}>{busy ? 'Analizando oferta…' : 'Analizar vacante'}</button></div>
+      </form>
+      {candidate && !candidate.password_expired && <section className="panel"><h2>Mis análisis</h2>{history.length ? <ul className="vacancy-history">{history.map((item) => <li key={item.id}><Link to={`/vacantes/${item.id}/analisis`}>{item.title}</Link><small>{item.company || 'Empresa no indicada'} · {new Date(item.created_at).toLocaleDateString('es-AR')}{item.risk_percentage !== null ? ` · Riesgo orientativo: ${item.risk_percentage}%` : ''}</small></li>)}</ul> : <p>Todavía no tenés vacantes analizadas.</p>}</section>}
+    </div>
+  </>
 }
+
+function ListCard({ title, items }: { title: string; items: string[] }) {
+  return <section className="panel result-card"><h2>{title}</h2>{items.length ? <ul>{items.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul> : <p>No se especifica en la oferta.</p>}</section>
+}
+
+function Findings({ title, items }: { title: string; items: Finding[] }) {
+  return <section className="risk-panel"><h2>{title}</h2>{items.length ? items.map((item, index) => <div className="risk-row" key={`${item.title}-${index}`}><div><h3>{item.title}</h3><p>{item.explanation}</p><small>Fragmento de la oferta: «{item.evidence}»</small></div><span className={`pill ${item.relevance === 'alta' ? 'red' : 'amber'}`}>Relevancia {item.relevance}</span></div>) : <p>No se detectaron {title.toLowerCase()} respaldadas por el texto de la oferta.</p>}</section>
+}
+
 export function AnalysisPage() {
-  return (
-    <>
-      <Header title="Análisis de vacante" screen="analysis" />
-      <div className="analysis-content">
-        <h2 className="vacancy-title">Desarrollador/a Frontend React</h2>
-        <div className="result-grid">
-          <section className="panel result-card">
-            <h2>Seniority detectado</h2>
-            <strong className="result-value">Semi Senior</strong>
-          </section>
-          <section className="panel result-card">
-            <h2>Experiencia requerida</h2>
-            <strong className="result-value">3+ años</strong>
-          </section>
-          <section className="panel result-card">
-            <h2>Tecnologías</h2>
-            <div className="tags">
-              {['React', 'TypeScript', 'Git'].map((tag) => (
-                <span key={tag}>{tag}</span>
-              ))}
-            </div>
-            <p>HTML · CSS · APIs REST · Testing</p>
-          </section>
-          <section className="panel result-card">
-            <h2>Competencias requeridas</h2>
-            <ul>
-              <li>Comunicación y trabajo en equipo</li>
-              <li>Resolución de problemas</li>
-              <li>Autonomía y atención al detalle</li>
-              <li>Manejo de hooks</li>
-              <li>Apoyo con herramientas de generación de código</li>
-            </ul>
-          </section>
-          <section className="panel result-card">
-            <h2>Responsabilidades</h2>
-            <ul>
-              <li>Desarrollar interfaces con React</li>
-              <li>Integrar APIs y escribir pruebas</li>
-              <li>Colaborar con Diseño y Backend</li>
-            </ul>
-          </section>
-          <section className="panel result-card">
-            <h2>Resumen</h2>
-            <p>
-              Rol frontend orientado a producto, con foco en React y calidad de
-              código. Requiere autonomía y colaboración con un equipo
-              multidisciplinario.
-            </p>
-          </section>
-        </div>
-        <section className="risk-panel">
-          <h2>Inconsistencias y señales de riesgo</h2>
-          <p>Puntos a validar con la empresa antes de avanzar en el proceso.</p>
-          <div className="risk-row">
-            <div>
-              <h3>Seniority inconsistente</h3>
-              <p>
-                La oferta se presenta como Junior, pero exige 3+ años de
-                experiencia y autonomía.
-              </p>
-            </div>
-            <span className="pill red">Relevancia alta</span>
-          </div>
-          <div className="risk-row">
-            <div>
-              <h3>Disponibilidad fuera de horario</h3>
-              <p>
-                Se mencionan guardias ocasionales sin detallar frecuencia ni
-                compensación.
-              </p>
-            </div>
-            <span className="pill amber">Relevancia media</span>
-          </div>
-        </section>
-        <div className="analysis-actions">
-          <Link className="secondary" to="/vacantes">
-            Volver a mis vacantes
-          </Link>
-          <Link className="primary" to="/comparaciones">
-            Comparar con mi perfil
-          </Link>
-        </div>
+  const { id } = useParams()
+  const location = useLocation()
+  const state = location.state as { result?: VacancyResult } | null
+  const [result, setResult] = useState<VacancyResult | null>(id ? state?.result ?? null : getTransientAnalysis())
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(!!id && !state?.result)
+
+  useEffect(() => {
+    if (!id) return
+    let active = true
+    getVacancy(Number(id)).then((response) => { if (active) { setResult(response); setError('') } })
+      .catch((reason: Error) => { if (active) setError(reason.message) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [id])
+
+  return <><Header title="Análisis de vacante" screen="analysis" />
+    {loading ? <p role="status">Cargando análisis…</p> : error ? <p className="field-error" role="alert">{error}</p> : !result ? <section className="panel"><p>Este análisis anónimo ya no está disponible. Volvé a pegar la oferta para analizarla de nuevo.</p><Link className="secondary" to="/vacantes">Analizar una vacante</Link></section> : <div className="analysis-content">
+      <h2 className="vacancy-title">{result.title}</h2>
+      <p className="helper">{result.company || 'Empresa no indicada'} · Análisis de la oferta, sin comparar con un CV. {result.id ? 'Guardado en tu cuenta.' : 'Resultado temporal: no se guardó.'}</p>
+      <div className="result-grid">
+        <section className="panel result-card"><h2>Seniority detectado</h2><strong className="result-value">{result.seniority || 'No especificado'}</strong></section>
+        <section className="panel result-card"><h2>Experiencia requerida</h2><strong className="result-value">{result.experience_required || 'No especificada'}</strong></section>
+        <section className="panel result-card"><h2>Tecnologías</h2>{result.technologies.length ? <div className="tags">{result.technologies.map((tag, index) => <span key={`${tag}-${index}`}>{tag}</span>)}</div> : <p>No se especifican.</p>}</section>
+        <ListCard title="Competencias requeridas" items={result.required_skills} />
+        <ListCard title="Responsabilidades" items={result.responsibilities} />
+        <section className="panel result-card"><h2>Resumen</h2><p>{result.summary || 'La oferta no proporciona detalles suficientes para un resumen.'}</p></section>
       </div>
-    </>
-  )
+      <section className="panel"><h2>Riesgo orientativo: {result.risk_percentage}%</h2><p>Indicador basado en alertas con evidencia textual (alta: 30 puntos, media: 15, baja: 5; máximo 100). No mide tu compatibilidad ni garantiza la calidad de la oferta.</p></section>
+      <Findings title="Inconsistencias" items={result.inconsistencies} />
+      <Findings title="Señales de riesgo" items={result.risk_signals} />
+      <div className="analysis-actions"><Link className="secondary" to="/vacantes">Analizar otra vacante</Link></div>
+    </div>}
+  </>
 }

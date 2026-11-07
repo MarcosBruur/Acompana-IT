@@ -1,0 +1,160 @@
+from collections import deque
+
+import pytest
+from fastapi.testclient import TestClient
+from httpx import Request, Response
+from openai import AuthenticationError, RateLimitError
+from sqlalchemy import create_engine, select
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.orm import Session
+
+from app.core.config import settings
+from app.db.base import Base
+from app.db.models import Candidate, CandidateSession, Vacancy, VacancyAnalysis
+from app.main import app
+from app.modules.auth.router import db_session
+from app.modules.vacancies import router as vacancy_router
+from app.modules.vacancies.analysis import Finding, VacancyExtraction
+
+API = "/api/v1/vacancies"
+INPUT = {"title": "Junior React", "company": "Empresa X", "description":
+         "Buscamos React, tres años de experiencia, guardias sin compensación y trabajo en equipo."}
+
+
+@compiles(JSONB, "sqlite")
+def sqlite_jsonb(_type, _compiler, **_kwargs):
+    return "JSON"
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'vacancies.db'}")
+    Base.metadata.create_all(engine, tables=[
+        Candidate.__table__, CandidateSession.__table__, Vacancy.__table__, VacancyAnalysis.__table__,
+    ])
+
+    def session():
+        with Session(engine) as db:
+            yield db
+
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    vacancy_router._requests.clear()
+    app.dependency_overrides[db_session] = session
+    with TestClient(app, base_url="http://localhost:8000",
+                    headers={"Origin": "http://localhost:5173"}) as http:
+        yield http, engine
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def register(http, email="ana@example.com"):
+    return http.post("/api/v1/auth/register", json={
+        "email": email, "first_name": "Ana", "last_name": "Pérez",
+        "password": "ClaveSegura1!", "confirm_password": "ClaveSegura1!",
+    })
+
+
+@pytest.fixture
+def model(monkeypatch):
+    calls = []
+
+    async def fake(title, company, description):
+        calls.append((title, company, description))
+        return VacancyExtraction(
+            seniority="Junior (mencionado)", experience_required="3 años",
+            technologies=["React"], required_skills=["Trabajo en equipo"],
+            responsibilities=[], summary="Rol frontend con guardias.",
+            inconsistencies=[Finding(title="Experiencia", explanation="Tres años para Junior.",
+                                     relevance="alta", evidence="tres años de experiencia")],
+            risk_signals=[Finding(title="Guardias", explanation="Falta compensación.",
+                                  relevance="media", evidence="guardias sin compensación"),
+                          Finding(title="Inventado", explanation="No está en el texto.",
+                                  relevance="alta", evidence="salario impago")],
+        )
+
+    monkeypatch.setattr(vacancy_router, "analyze_offer", fake)
+    return calls
+
+
+def test_public_ephemeral_and_authenticated_history(client, model):
+    http, engine = client
+    public = http.post(f"{API}/analyze", json=INPUT)
+    assert public.status_code == 200
+    assert public.json()["id"] is None
+    assert public.json()["risk_percentage"] == 45
+    assert len(public.json()["risk_signals"]) == 1
+    assert model == [(INPUT["title"], INPUT["company"], INPUT["description"])]
+    with Session(engine) as db:
+        assert db.scalar(select(Vacancy)) is None
+    assert http.get(API).status_code == 401
+
+    register(http)
+    saved = http.post(f"{API}/analyze", json=INPUT)
+    assert saved.status_code == 200
+    vacancy_id = saved.json()["id"]
+    assert isinstance(vacancy_id, int)
+    assert http.get(API).json()[0]["id"] == vacancy_id
+    assert http.get(f"{API}/{vacancy_id}").json() == saved.json()
+    with Session(engine) as db:
+        assert db.scalar(select(VacancyAnalysis)).responsibilities == []
+    register(http, "otra@example.com")
+    assert http.get(API).json() == []
+    assert http.get(f"{API}/{vacancy_id}").status_code == 404
+
+
+def test_validation_missing_key_provider_failure_and_limits(client, model, monkeypatch):
+    http, _ = client
+    assert http.post(f"{API}/analyze", json={**INPUT, "description": "   "}).status_code == 422
+    assert http.post(f"{API}/analyze", json={**INPUT, "description": "x" * 12001}).status_code == 422
+    assert http.post(f"{API}/analyze", json=INPUT, headers={"Origin": "https://otro.example"}).status_code == 403
+    monkeypatch.setattr(settings, "openai_api_key", None)
+    assert http.post(f"{API}/analyze", json=INPUT).status_code == 503
+    assert model == []
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+
+    async def failure(*_args):
+        raise RuntimeError("secret-provider-error")
+
+    monkeypatch.setattr(vacancy_router, "analyze_offer", failure)
+    response = http.post(f"{API}/analyze", json=INPUT)
+    assert response.status_code == 502
+    assert "secret-provider-error" not in response.text
+    vacancy_router._requests["ip:testclient"] = deque([vacancy_router.monotonic()] * 10)
+    assert http.post(f"{API}/analyze", json=INPUT).status_code == 429
+
+
+@pytest.mark.parametrize(("error", "detail"), [
+    (RateLimitError("Sin saldo", response=Response(429, request=Request("POST", "https://api.openai.com/v1/chat/completions")),
+                    body={"code": "credit_balance_exhausted"}),
+     "no tiene créditos disponibles"),
+    (RateLimitError("Demasiadas solicitudes", response=Response(429, request=Request("POST", "https://api.openai.com/v1/chat/completions")),
+                    body={"code": "rate_limit_exceeded"}),
+     "límite de solicitudes"),
+    (AuthenticationError("Clave inválida", response=Response(401, request=Request("POST", "https://api.openai.com/v1/chat/completions")),
+                         body={"code": "invalid_api_key"}),
+     "clave de OpenAI configurada no es válida"),
+])
+def test_provider_configuration_errors_have_actionable_safe_messages(client, monkeypatch, error, detail):
+    http, _ = client
+
+    async def failure(*_args):
+        raise error
+
+    monkeypatch.setattr(vacancy_router, "analyze_offer", failure)
+    response = http.post(f"{API}/analyze", json=INPUT)
+    assert response.status_code == 503
+    assert detail in response.json()["detail"]
+    assert str(error) not in response.text
+
+
+def test_extraction_rejects_values_that_do_not_fit_database():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        VacancyExtraction(
+            seniority="x" * 51, experience_required="", technologies=[], required_skills=[],
+            responsibilities=[], summary="", inconsistencies=[], risk_signals=[],
+        )
+    with pytest.raises(ValidationError):
+        Finding(title="Alerta", explanation="Explicación", relevance="alta", evidence="a")

@@ -15,11 +15,11 @@ import { modules } from './features/modules'
 import { Asset, PreviewNotice, type DesignScreen } from './components/Design'
 import { Dashboard } from './pages/Dashboard'
 import { AuthPage } from './pages/AuthPage'
-import { ResumePage } from './pages/ResumePage'
 import { VacancyPage, AnalysisPage } from './pages/VacancyPage'
 import { InterviewPage } from './pages/InterviewPage'
 import { ModulePage } from './pages/ModulePage'
 import { ChangePasswordPage } from './pages/ChangePasswordPage'
+import { ProfilePage } from './pages/ProfilePage'
 import './App.css'
 
 function Layout() {
@@ -27,9 +27,7 @@ function Layout() {
   const navigate = useNavigate()
   const { candidate, logout } = useAuth()
   const screen: DesignScreen =
-    pathname === '/curriculum'
-      ? 'resume'
-      : pathname.includes('/analisis')
+    pathname.includes('/analisis')
         ? 'analysis'
         : pathname.startsWith('/vacantes')
           ? 'vacancy'
@@ -46,7 +44,7 @@ function Layout() {
         <nav aria-label="Navegación principal">
           {[
             { to: '/', label: 'Inicio', icon: 'imgGrid' },
-            { to: '/curriculum', label: 'Mi currículum', icon: 'imgFile' },
+            { to: '/perfil', label: 'Perfil', icon: 'imgAvatar' },
             { to: '/vacantes', label: 'Mis vacantes', icon: 'imgBriefcase' },
             {
               to: '/entrevistas',
@@ -62,9 +60,9 @@ function Layout() {
         </nav>
         {candidate ? (
           <button className="logout" type="button" onClick={() => {
-            void logout().then(() => navigate('/')).catch(() => window.alert('No se pudo cerrar la sesión. Intentá de nuevo.'))
-          }}>
-            <Asset screen={screen} name="imgLogOut" />Cerrar sesión
+             void logout().then(() => navigate('/sesion')).catch(() => window.alert('No se pudo cambiar de cuenta. Intentá de nuevo.'))
+           }}>
+             <Asset screen={screen} name="imgLogOut" />Cambiar cuenta
           </button>
         ) : (
           <Link className="logout" to="/sesion"><Asset screen={screen} name="imgLogOut" />Iniciar sesión</Link>
@@ -105,10 +103,12 @@ function App() {
         <Route path="/cambiar-contrasena" element={<RequireRenewal />} />
         <Route element={<Layout />}>
           <Route index element={<Dashboard />} />
-          <Route path="/curriculum" element={<ResumePage />} />
+          <Route path="/curriculum" element={<Navigate to="/perfil" replace />} />
+          <Route path="/perfil" element={<RequireAccount><ProfilePage /></RequireAccount>} />
           <Route path="/vacantes" element={<VacancyPage />} />
           <Route path="/vacantes/nueva" element={<VacancyPage />} />
-          <Route path="/vacantes/ejemplo/analisis" element={<AnalysisPage />} />
+          <Route path="/vacantes/analisis" element={<AnalysisPage />} />
+          <Route path="/vacantes/:id/analisis" element={<AnalysisPage />} />
           <Route path="/entrevistas" element={<RequireAccount><InterviewPage /></RequireAccount>} />
           {modules
             .filter((module) =>

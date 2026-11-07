@@ -5,6 +5,8 @@ export type Candidate = {
   email: string
   first_name: string
   last_name: string
+  nickname: string | null
+  avatar_url: string | null
   password_expired: boolean
   role: 'candidato'
 }

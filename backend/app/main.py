@@ -11,7 +11,7 @@ app = FastAPI(title="Acompañamiento IT", version="0.1.0")
 @app.middleware("http")
 async def require_trusted_origin(request: Request, call_next):
     if (
-        request.url.path.startswith("/api/v1/auth/")
+        request.url.path.startswith("/api/v1/")
         and request.method in {"POST", "PUT", "PATCH", "DELETE"}
         and request.headers.get("origin") not in {settings.frontend_origin, settings.backend_origin}
     ):
