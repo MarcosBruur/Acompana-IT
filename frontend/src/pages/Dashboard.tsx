@@ -20,7 +20,7 @@ export function Dashboard() {
         'Pegá la descripción de un puesto para identificar requisitos y posibles alertas de la oferta.',
       action: 'Comenzar análisis',
       icon: 'imgSearch',
-      to: '/vacantes',
+      to: '/vacantes/nueva',
     },
     {
       title: 'Comparar curriculum-vacante',
@@ -42,9 +42,14 @@ export function Dashboard() {
   return (
     <>
       <Header title={`Bienvenido${candidate ? `, ${candidate.nickname || candidate.first_name}` : ''}`} screen="dashboard" />
+      <div className="dashboard-intro">
+        <span className="eyebrow">TU ESPACIO DE TRABAJO</span>
+        <p>Un paso a la vez: explorá oportunidades y prepará tu próxima postulación.</p>
+      </div>
       <div className="action-cards">
         {cards.map((card, i) => (
           <article className="action-card" key={card.title}>
+            <span className="card-number">0{i + 1} / EXPLORAR</span>
             <div
               className={i === 0 ? 'icon-badge primary-badge' : 'icon-badge'}
             >
@@ -83,45 +88,17 @@ export function Dashboard() {
                 </div>
               </Link>
             ))}
-            {!recent.length && <p>Los análisis que guardes aparecerán aquí. <Link to="/vacantes">Analizar una vacante</Link></p>}
+            {!recent.length && <div className="empty-state"><span className="empty-state-symbol" aria-hidden="true">↗</span><h3>Todavía no hay vacantes analizadas</h3><p>Cuando analices una oferta, aparecerá en este espacio para que puedas retomarla.</p><Link className="card-action" to="/vacantes/nueva">Analizar una vacante <span aria-hidden="true">→</span></Link></div>}
           </div>
         </section>
         <section className="interviews-card">
           <h2>Entrevistas recientes</h2>
-          <p>Historial de tus sesiones de simulación IA</p>
-          <div className="interviews-list">
-            {[
-              'Entrevista técnica - React',
-              'Introducción de Fit Cultural',
-              'Algoritmos y Estructuras',
-            ].map((title, i) => (
-              <Link className="interview-row" key={title} to="/entrevistas">
-                <div>
-                  <h3>{title}</h3>
-                  <span className={i < 2 ? 'pill green' : 'pill neutral'}>
-                    {['Score: 8.5/10', 'Score: 9.0/10', 'Por revisar'][i]}
-                  </span>
-                </div>
-                <div>
-                  <span>
-                    {
-                      [
-                        'Simulación de Rol Sr.',
-                        'Práctica general',
-                        'Práctica técnica',
-                      ][i]
-                    }
-                  </span>
-                  <span className="muted">
-                    {
-                      ['Hace un día, 18:30', 'Ene 14, 15:00', 'Ene 10, 11:20'][
-                        i
-                      ]
-                    }
-                  </span>
-                </div>
-              </Link>
-            ))}
+          <p>Prepará tus respuestas con tiempo y confianza.</p>
+          <div className="empty-state interview-empty">
+            <span className="empty-state-symbol" aria-hidden="true">◎</span>
+            <h3>Tu práctica empieza acá</h3>
+            <p>La simulación de entrevistas todavía está en preparación. Pronto vas a poder practicar desde este espacio.</p>
+            <Link className="card-action" to="/entrevistas">Conocer el módulo <span aria-hidden="true">→</span></Link>
           </div>
         </section>
       </div>

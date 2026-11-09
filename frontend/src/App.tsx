@@ -10,28 +10,33 @@ import {
   useNavigate,
 } from 'react-router-dom'
 import { AuthProvider } from './features/auth'
+import { NotificationsProvider } from './features/notifications'
+import { useNotifications } from './features/notifications-context'
 import { useAuth } from './features/auth-context'
 import { modules } from './features/modules'
 import { Asset, PreviewNotice, type DesignScreen } from './components/Design'
 import { Dashboard } from './pages/Dashboard'
 import { AuthPage } from './pages/AuthPage'
-import { VacancyPage, AnalysisPage } from './pages/VacancyPage'
-import { InterviewPage } from './pages/InterviewPage'
+import { VacancyPage, NewVacancyPage, AnalysisPage } from './pages/VacancyPage'
+import { InterviewPreviewPage } from './pages/InterviewPage'
+import { InterviewHistoryPage, InterviewResultPage } from './pages/InterviewHistoryPage'
 import { ModulePage } from './pages/ModulePage'
 import { ChangePasswordPage } from './pages/ChangePasswordPage'
 import { ProfilePage } from './pages/ProfilePage'
 import './App.css'
+import './theme.css'
 
 function Layout() {
   const { pathname } = useLocation()
   const navigate = useNavigate()
   const { candidate, logout } = useAuth()
+  const notifications = useNotifications()
   const screen: DesignScreen =
     pathname.includes('/analisis')
         ? 'analysis'
         : pathname.startsWith('/vacantes')
           ? 'vacancy'
-          : pathname === '/entrevistas'
+           : pathname.startsWith('/entrevistas')
             ? 'interview'
             : 'dashboard'
   return (
@@ -40,7 +45,10 @@ function Layout() {
         Saltar al contenido
       </a>
       <aside className="sidebar">
-        <Asset screen={screen} name="imgGlow" className="sidebar-glow" />
+        <Link className="sidebar-brand" to="/" aria-label="Acompañamiento IT, ir al inicio">
+          <span className="brand-mark" aria-hidden="true">a.</span>
+          <span>acompaña<span className="brand-suffix"> / IT</span></span>
+        </Link>
         <nav aria-label="Navegación principal">
           {[
             { to: '/', label: 'Inicio', icon: 'imgGrid' },
@@ -60,7 +68,7 @@ function Layout() {
         </nav>
         {candidate ? (
           <button className="logout" type="button" onClick={() => {
-             void logout().then(() => navigate('/sesion')).catch(() => window.alert('No se pudo cambiar de cuenta. Intentá de nuevo.'))
+              void logout().then(() => { notifications.success('Sesión cerrada correctamente.'); navigate('/sesion') }).catch(() => notifications.error('No se pudo cambiar de cuenta. Intentá de nuevo.'))
            }}>
              <Asset screen={screen} name="imgLogOut" />Cambiar cuenta
           </button>
@@ -95,7 +103,7 @@ function RequireRenewal() {
 function App() {
   return (
     <BrowserRouter>
-      <AuthProvider><Routes>
+      <NotificationsProvider><AuthProvider><Routes>
         <Route path="/sesion" element={<AuthPage />} />
         <Route path="/login" element={<AuthPage />} />
         <Route path="/registro" element={<AuthPage register />} />
@@ -106,10 +114,12 @@ function App() {
           <Route path="/curriculum" element={<Navigate to="/perfil" replace />} />
           <Route path="/perfil" element={<RequireAccount><ProfilePage /></RequireAccount>} />
           <Route path="/vacantes" element={<VacancyPage />} />
-          <Route path="/vacantes/nueva" element={<VacancyPage />} />
+          <Route path="/vacantes/nueva" element={<NewVacancyPage />} />
           <Route path="/vacantes/analisis" element={<AnalysisPage />} />
           <Route path="/vacantes/:id/analisis" element={<AnalysisPage />} />
-          <Route path="/entrevistas" element={<RequireAccount><InterviewPage /></RequireAccount>} />
+           <Route path="/entrevistas" element={<RequireAccount><InterviewHistoryPage /></RequireAccount>} />
+           <Route path="/entrevistas/nueva" element={<RequireAccount><InterviewPreviewPage /></RequireAccount>} />
+           <Route path="/entrevistas/:id" element={<RequireAccount><InterviewResultPage /></RequireAccount>} />
           {modules
             .filter((module) =>
               ['/comparaciones', '/aprendizaje'].includes(module.path),
@@ -131,7 +141,7 @@ function App() {
             }
           />
         </Route>
-      </Routes></AuthProvider>
+      </Routes></AuthProvider></NotificationsProvider>
     </BrowserRouter>
   )
 }

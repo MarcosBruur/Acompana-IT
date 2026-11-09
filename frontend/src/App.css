@@ -348,6 +348,10 @@ h3 {
   display: grid;
   gap: 28px;
 }
+.vacancy-list-heading {
+  display: flex;
+  justify-content: flex-end;
+}
 .upload-panel h2,
 .vacancy-form h2 {
   font-size: 20px;

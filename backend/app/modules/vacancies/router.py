@@ -183,7 +183,8 @@ async def analyze(data: VacancyInput, request: Request, db: Database, candidate:
 def history(candidate: OptionalCandidate, db: Database):
     if not candidate:
         raise HTTPException(401, "Iniciá sesión para consultar tus análisis.")
-    rows = db.scalars(select(Vacancy).where(Vacancy.candidate_id == candidate.id)
+    rows = db.scalars(select(Vacancy).where(Vacancy.candidate_id == candidate.id,
+                                           Vacancy.active.is_(True))
                       .order_by(Vacancy.created_at.desc(), Vacancy.id.desc()).limit(30)).all()
     return [VacancySummary(id=row.id, title=row.title, company=row.company,
                            created_at=row.created_at,
@@ -196,7 +197,21 @@ def get_analysis(vacancy_id: int, candidate: OptionalCandidate, db: Database):
     if not candidate:
         raise HTTPException(401, "Iniciá sesión para consultar tus análisis.")
     vacancy = db.scalar(select(Vacancy).where(Vacancy.id == vacancy_id,
-                                             Vacancy.candidate_id == candidate.id))
+                                             Vacancy.candidate_id == candidate.id,
+                                             Vacancy.active.is_(True)))
     if not vacancy or not vacancy.analysis:
         raise HTTPException(404, "Análisis no encontrado.")
     return as_result(vacancy, vacancy.analysis)
+
+
+@router.patch("/{vacancy_id}/hide", status_code=204)
+def hide_vacancy(vacancy_id: int, candidate: OptionalCandidate, db: Database):
+    if not candidate:
+        raise HTTPException(401, "Iniciá sesión para gestionar tus vacantes.")
+    vacancy = db.scalar(select(Vacancy).where(Vacancy.id == vacancy_id,
+                                             Vacancy.candidate_id == candidate.id,
+                                             Vacancy.active.is_(True)))
+    if not vacancy:
+        raise HTTPException(404, "Vacante no encontrada.")
+    vacancy.active = False
+    db.commit()

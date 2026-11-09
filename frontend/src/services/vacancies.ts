@@ -35,7 +35,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     const detail = body.detail
     throw new Error(typeof detail === 'string' ? detail : 'No se pudo completar el análisis. Intentá de nuevo.')
   }
-  return response.json() as Promise<T>
+  return response.status === 204 ? undefined as T : response.json() as Promise<T>
 }
 
 export function analyzeVacancy(data: { title: string; company: string | null; description: string }) {
@@ -46,3 +46,4 @@ export function analyzeVacancy(data: { title: string; company: string | null; de
 }
 export const getVacancy = (id: number) => request<VacancyResult>(`/${id}`)
 export const getVacancies = () => request<VacancySummary[]>('')
+export const hideVacancy = (id: number) => request<void>(`/${id}/hide`, { method: 'PATCH' })

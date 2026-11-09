@@ -10,11 +10,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     const body = await response.json().catch(() => ({}))
     throw new Error(typeof body.detail === 'string' ? body.detail : 'No se pudo completar la solicitud.')
   }
-  return response.json() as Promise<T>
+  return response.status === 204 ? undefined as T : response.json() as Promise<T>
 }
 
 export const listResumes = () => request<Resume[]>('/resumes')
 export const selectPrimary = (id: number) => request<Resume>(`/resumes/${id}/primary`, { method: 'PATCH' })
+export const hideResume = (id: number) => request<void>(`/resumes/${id}/hide`, { method: 'PATCH' })
 export const saveNickname = (nickname: string) => request<Candidate>('', {
   method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nickname }),
 })

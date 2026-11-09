@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState, type PointerEvent } from 'react'
-import { Asset, Header } from '../components/Design'
+import { useEffect, useRef, useState, type FormEvent, type PointerEvent } from 'react'
+import { TrashIcon } from '@heroicons/react/24/outline'
+import { Asset, Header, Modal } from '../components/Design'
 import { useAuth } from '../features/auth-context'
+import { useNotifications } from '../features/notifications-context'
 import type { Candidate } from '../services/auth'
-import { listResumes, saveNickname, selectPrimary, uploadFile, validatePdf, type Resume } from '../services/profile'
+import { hideResume, listResumes, saveNickname, selectPrimary, uploadFile, validatePdf, type Resume } from '../services/profile'
 
 const SIDE = 256
 
@@ -99,39 +101,74 @@ function CropPhoto({ file, onClose, onSaved }: { file: File; onClose: () => void
 
 export function ProfilePage() {
   const { candidate, setCandidate } = useAuth()
+  const notifications = useNotifications()
   const photoInput = useRef<HTMLInputElement>(null)
   const cvInput = useRef<HTMLInputElement>(null)
   const [nickname, setNickname] = useState(candidate?.nickname || candidate?.first_name || '')
   const [resumes, setResumes] = useState<Resume[]>([])
   const [photo, setPhoto] = useState<File | null>(null)
-  const [message, setMessage] = useState('')
-  const [error, setError] = useState('')
+  const [selectedResume, setSelectedResume] = useState<Resume | null>(null)
+  const [removeError, setRemoveError] = useState('')
   const [busy, setBusy] = useState(false)
   const [dragging, setDragging] = useState(false)
 
-  useEffect(() => { listResumes().then(setResumes).catch((reason: Error) => setError(reason.message)) }, [])
+  useEffect(() => { listResumes().then(setResumes).catch((reason: Error) => notifications.error(reason.message)) }, [notifications])
   async function refresh() { setResumes(await listResumes()) }
   async function addResume(file?: File) {
     if (!file || busy) return
-    setError(''); setMessage('')
     try {
       await validatePdf(file)
       setBusy(true)
       await uploadFile('/resumes', file)
+      notifications.success('Currículum cargado correctamente.')
       await refresh()
-      setMessage('Currículum guardado correctamente.')
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'No se pudo cargar el CV.') }
+    } catch (reason) { notifications.error(reason instanceof Error ? reason.message : 'No se pudo cargar el currículum.') }
     finally { setBusy(false) }
   }
 
   async function makePrimary(id: number) {
-    setBusy(true); setError(''); setMessage('')
+    setBusy(true)
     try {
       await selectPrimary(id)
+      notifications.success('Currículum principal actualizado.')
       await refresh()
-      setMessage('Currículum principal actualizado.')
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'No se pudo actualizar el currículum principal.') }
+    } catch (reason) { notifications.error(reason instanceof Error ? reason.message : 'No se pudo actualizar el currículum principal.') }
     finally { setBusy(false) }
+  }
+
+  async function confirmRemove() {
+    if (!selectedResume || busy) return
+    setBusy(true)
+    setRemoveError('')
+    try {
+      await hideResume(selectedResume.id)
+      setResumes((current) => {
+        const remaining = current.filter((resume) => resume.id !== selectedResume.id)
+        if (!selectedResume.is_primary) return remaining
+        return remaining.map((resume, index) => ({ ...resume, is_primary: index === 0 }))
+      })
+      setSelectedResume(null)
+      notifications.success('Currículum quitado de tu perfil.')
+      try { await refresh() }
+      catch { notifications.error('El currículum se quitó, pero no se pudo actualizar el listado. Recargá la página.') }
+    } catch (reason) {
+      setRemoveError(reason instanceof Error ? reason.message : 'No se pudo quitar el currículum.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function updateNickname(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setBusy(true)
+    try {
+      setCandidate(await saveNickname(nickname.trim()))
+      notifications.success('Nombre visible actualizado.')
+    } catch (reason) {
+      notifications.error(reason instanceof Error ? reason.message : 'No se pudo actualizar el nombre visible.')
+    } finally {
+      setBusy(false)
+    }
   }
 
   const primary = resumes.find((resume) => resume.is_primary)
@@ -145,9 +182,9 @@ export function ProfilePage() {
           {candidate?.avatar_url ? <img src={candidate.avatar_url} alt="" /> : <Asset screen="dashboard" name="imgAvatar" />}
           <span className="edit-avatar" aria-hidden="true">✎</span>
         </button>
-        <input ref={photoInput} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" aria-label="Seleccionar foto" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; if (file) { if (file.size > 5 * 1024 * 1024 || !['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) setError('Elegí una imagen JPG, PNG o WebP de hasta 5 MB.'); else { setError(''); setPhoto(file) } } }} />
+        <input ref={photoInput} className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" aria-label="Seleccionar foto" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; if (file) { if (file.size > 5 * 1024 * 1024 || !['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) notifications.error('Elegí una imagen JPG, PNG o WebP de hasta 5 MB.'); else setPhoto(file) } }} />
         <div className="profile-name"><h2>Tu apodo</h2>
-          <form onSubmit={(event) => { event.preventDefault(); setBusy(true); setError(''); void saveNickname(nickname.trim()).then(setCandidate).then(() => setMessage('Apodo actualizado.')).catch((reason: Error) => setError(reason.message)).finally(() => setBusy(false)) }}>
+          <form onSubmit={(event) => void updateNickname(event)}>
             <label className="field">Nombre visible<input value={nickname} maxLength={100} required onChange={(event) => setNickname(event.target.value)} /></label>
             <button className="primary" disabled={busy || !nickname.trim()}>Guardar</button>
           </form>
@@ -165,17 +202,20 @@ export function ProfilePage() {
           </div>
         </section>
         <section className="panel current-cv"><div className="cv-heading"><h2>Currículum principal</h2>{primary && <span className="pill green">Principal</span>}</div>
-          {primary ? <div className="file-details"><div className="pdf-badge"><Asset screen="resume" name="imgFile1" /><span>PDF</span></div><div className="file-meta"><strong>{primary.filename}</strong><p>Fecha de carga: {new Date(primary.uploaded_at).toLocaleDateString('es-AR')}</p></div></div> : <p>Tu currículum principal aparecerá aquí cuando cargues un PDF.</p>}
+          {primary ? <div className="file-details"><div className="pdf-badge"><Asset screen="resume" name="imgFile1" /><span>PDF</span></div><div className="file-meta"><strong>{primary.filename}</strong><p>Fecha de carga: {new Date(primary.uploaded_at).toLocaleDateString('es-AR')}</p></div><button className="secondary profile-delete" type="button" disabled={busy} aria-label={`Eliminar currículum ${primary.filename}`} onClick={() => { setRemoveError(''); setSelectedResume(primary) }}><TrashIcon aria-hidden="true" />Eliminar</button></div> : <p>Tu currículum principal aparecerá aquí cuando cargues un PDF.</p>}
         </section>
         {others.length > 0 && <section className="profile-other-cvs" aria-label="Otros currículums"><h2>Otros currículums</h2>
           <ul className="profile-cv-list">{others.map((resume) => <li className="panel current-cv" key={resume.id}>
-            <div className="file-details"><div className="pdf-badge"><Asset screen="resume" name="imgFile1" /><span>PDF</span></div><div className="file-meta"><strong>{resume.filename}</strong><p>Fecha de carga: {new Date(resume.uploaded_at).toLocaleDateString('es-AR')}</p></div><button className="secondary" disabled={busy} onClick={() => void makePrimary(resume.id)}>Elegir como principal</button></div>
+            <div className="file-details"><div className="pdf-badge"><Asset screen="resume" name="imgFile1" /><span>PDF</span></div><div className="file-meta"><strong>{resume.filename}</strong><p>Fecha de carga: {new Date(resume.uploaded_at).toLocaleDateString('es-AR')}</p></div><div className="profile-cv-actions"><button className="secondary" type="button" disabled={busy} onClick={() => void makePrimary(resume.id)}>Elegir como principal</button><button className="secondary profile-delete" type="button" disabled={busy} aria-label={`Eliminar currículum ${resume.filename}`} onClick={() => { setRemoveError(''); setSelectedResume(resume) }}><TrashIcon aria-hidden="true" />Eliminar</button></div></div>
           </li>)}</ul>
         </section>}
       </div>
-      {error && <p className="field-error" role="alert">{error}</p>}
-      {message && <p className="inline-notice" role="status">{message}</p>}
     </div>
-    {photo && <CropPhoto file={photo} onClose={() => setPhoto(null)} onSaved={(saved) => { setCandidate(saved); setPhoto(null); setMessage('Foto actualizada.') }} />}
+    {photo && <CropPhoto file={photo} onClose={() => setPhoto(null)} onSaved={(saved) => { setCandidate(saved); setPhoto(null); notifications.success('Foto de perfil actualizada.') }} />}
+    {selectedResume && <Modal title="¿Eliminar currículum del perfil?" onClose={() => { if (!busy) setSelectedResume(null) }}>
+      <p>«{selectedResume.filename}» dejará de aparecer en tu perfil. El archivo y los datos relacionados se conservarán.{selectedResume.is_primary && resumes.length > 1 ? ' Otro currículum pasará a ser principal.' : ''}</p>
+      {removeError && <p className="field-error" role="alert">{removeError}</p>}
+      <button className="primary" type="button" disabled={busy} onClick={() => void confirmRemove()}>{busy ? 'Eliminando…' : 'Sí, eliminar del perfil'}</button>
+    </Modal>}
   </>
 }

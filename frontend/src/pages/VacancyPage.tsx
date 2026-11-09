@@ -1,16 +1,75 @@
 import { useEffect, useState, type FormEvent } from 'react'
+import { TrashIcon } from '@heroicons/react/24/outline'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
-import { Header } from '../components/Design'
+import { Header, Modal } from '../components/Design'
 import { useAuth } from '../features/auth-context'
-import { analyzeVacancy, getTransientAnalysis, getVacancies, getVacancy, setTransientAnalysis, type Finding, type VacancyResult, type VacancySummary } from '../services/vacancies'
+import { useNotifications } from '../features/notifications-context'
+import { analyzeVacancy, getTransientAnalysis, getVacancies, getVacancy, hideVacancy, setTransientAnalysis, type Finding, type VacancyResult, type VacancySummary } from '../services/vacancies'
 
 export function VacancyPage() {
+  const { candidate, loading: authLoading } = useAuth()
+  const notifications = useNotifications()
+  const [history, setHistory] = useState<{ ownerId: number; items: VacancySummary[]; error: string } | null>(null)
+  const [selected, setSelected] = useState<VacancySummary | null>(null)
+  const [removeError, setRemoveError] = useState('')
+  const [removing, setRemoving] = useState(false)
+  const candidateId = candidate?.password_expired ? undefined : candidate?.id
+
+  useEffect(() => {
+    if (candidateId === undefined) return
+    let active = true
+    getVacancies()
+      .then((items) => { if (active) setHistory({ ownerId: candidateId, items, error: '' }) })
+      .catch(() => { if (active) setHistory({ ownerId: candidateId, items: [], error: 'No se pudo consultar el historial.' }) })
+    return () => { active = false }
+  }, [candidateId])
+
+  const currentHistory = history?.ownerId === candidateId ? history : null
+
+  async function confirmRemove() {
+    if (!selected || removing) return
+    setRemoving(true)
+    setRemoveError('')
+    try {
+      await hideVacancy(selected.id)
+      setHistory((current) => current && current.ownerId === candidateId
+        ? { ...current, items: current.items.filter((item) => item.id !== selected.id) }
+        : current)
+      setSelected(null)
+      notifications.success('Vacante quitada de tu listado.')
+    } catch (reason) {
+      setRemoveError(reason instanceof Error ? reason.message : 'No se pudo quitar la vacante.')
+    } finally {
+      setRemoving(false)
+    }
+  }
+
+  return <>
+    <Header title="Mis vacantes" screen="vacancy" />
+    <div className="vacancy-content">
+      <div className="vacancy-list-heading"><Link className="primary" to="/vacantes/nueva">Analizar vacante</Link></div>
+      <section className="panel">
+        <h2>Vacantes analizadas</h2>
+        {authLoading || candidateId !== undefined && !currentHistory ? <p role="status">Cargando vacantes…</p> : currentHistory?.error ? <p className="field-error" role="alert">{currentHistory.error}</p> : currentHistory?.items.length ? <ul className="vacancy-history">{currentHistory.items.map((item) => <li key={item.id}>
+          <div className="vacancy-history-details"><Link to={`/vacantes/${item.id}/analisis`}>{item.title}</Link><small>{item.company || 'Empresa no indicada'} · {new Date(item.created_at).toLocaleDateString('es-AR')}{item.risk_percentage !== null ? ` · Riesgo orientativo: ${item.risk_percentage}%` : ''}</small></div>
+          <button className="vacancy-remove" type="button" aria-label={`Eliminar vacante ${item.title} del listado`} title="Eliminar del listado" onClick={() => { setRemoveError(''); setSelected(item) }}><TrashIcon aria-hidden="true" /><span>Eliminar</span></button>
+        </li>)}</ul> : <p>Aún no tienes vacantes analizadas. Ingresa vacantes para visualizar todas.</p>}
+      </section>
+    </div>
+    {selected && <Modal title="¿Eliminar vacante del listado?" onClose={() => { if (!removing) setSelected(null) }}>
+      <p>«{selected.title}» dejará de aparecer en tus vacantes. Los resultados de entrevistas y comparaciones relacionados se conservarán.</p>
+      {removeError && <p className="field-error" role="alert">{removeError}</p>}
+      <button className="primary" type="button" disabled={removing} onClick={() => void confirmRemove()}>{removing ? 'Eliminando…' : 'Sí, eliminar del listado'}</button>
+    </Modal>}
+  </>
+}
+
+export function NewVacancyPage() {
   const { candidate } = useAuth()
+  const notifications = useNotifications()
   const navigate = useNavigate()
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [history, setHistory] = useState<VacancySummary[]>([])
-  useEffect(() => { if (candidate && !candidate.password_expired) getVacancies().then(setHistory).catch(() => setError('No se pudo consultar el historial.')) }, [candidate])
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -22,6 +81,7 @@ export function VacancyPage() {
         company: String(form.get('company') ?? '').trim() || null,
         description: String(form.get('description') ?? '').trim(),
       })
+      notifications.success(result.id ? 'Vacante analizada y guardada en tu cuenta.' : 'Análisis completado. Este resultado temporal no se guardó.')
       if (result.id) navigate(`/vacantes/${result.id}/analisis`, { state: { result } })
       else { setTransientAnalysis(result); navigate('/vacantes/analisis') }
     } catch (reason) { setError(reason instanceof Error && reason.name !== 'TimeoutError' ? reason.message : 'El análisis tardó demasiado. Volvé a intentarlo.') }
@@ -44,7 +104,6 @@ export function VacancyPage() {
         {error && <p className="field-error" role="alert">{error}</p>}
         <div className="form-actions"><p className="helper">Completá el título y la descripción para iniciar el análisis.</p><button className="primary" type="submit" disabled={busy}>{busy ? 'Analizando oferta…' : 'Analizar vacante'}</button></div>
       </form>
-      {candidate && !candidate.password_expired && <section className="panel"><h2>Mis análisis</h2>{history.length ? <ul className="vacancy-history">{history.map((item) => <li key={item.id}><Link to={`/vacantes/${item.id}/analisis`}>{item.title}</Link><small>{item.company || 'Empresa no indicada'} · {new Date(item.created_at).toLocaleDateString('es-AR')}{item.risk_percentage !== null ? ` · Riesgo orientativo: ${item.risk_percentage}%` : ''}</small></li>)}</ul> : <p>Todavía no tenés vacantes analizadas.</p>}</section>}
     </div>
   </>
 }
@@ -75,7 +134,7 @@ export function AnalysisPage() {
   }, [id])
 
   return <><Header title="Análisis de vacante" screen="analysis" />
-    {loading ? <p role="status">Cargando análisis…</p> : error ? <p className="field-error" role="alert">{error}</p> : !result ? <section className="panel"><p>Este análisis anónimo ya no está disponible. Volvé a pegar la oferta para analizarla de nuevo.</p><Link className="secondary" to="/vacantes">Analizar una vacante</Link></section> : <div className="analysis-content">
+    {loading ? <p role="status">Cargando análisis…</p> : error ? <p className="field-error" role="alert">{error}</p> : !result ? <section className="panel"><p>Este análisis anónimo ya no está disponible. Volvé a pegar la oferta para analizarla de nuevo.</p><Link className="secondary" to="/vacantes/nueva">Analizar una vacante</Link></section> : <div className="analysis-content">
       <h2 className="vacancy-title">{result.title}</h2>
       <p className="helper">{result.company || 'Empresa no indicada'} · Análisis de la oferta, sin comparar con un CV. {result.id ? 'Guardado en tu cuenta.' : 'Resultado temporal: no se guardó.'}</p>
       <div className="result-grid">
@@ -89,7 +148,7 @@ export function AnalysisPage() {
       <section className="panel"><h2>Riesgo orientativo: {result.risk_percentage}%</h2><p>Indicador basado en alertas con evidencia textual (alta: 30 puntos, media: 15, baja: 5; máximo 100). No mide tu compatibilidad ni garantiza la calidad de la oferta.</p></section>
       <Findings title="Inconsistencias" items={result.inconsistencies} />
       <Findings title="Señales de riesgo" items={result.risk_signals} />
-      <div className="analysis-actions"><Link className="secondary" to="/vacantes">Analizar otra vacante</Link></div>
+      <div className="analysis-actions"><Link className="secondary" to="/vacantes/nueva">Analizar otra vacante</Link></div>
     </div>}
   </>
 }

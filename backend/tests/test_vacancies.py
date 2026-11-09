@@ -11,7 +11,14 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.base import Base
-from app.db.models import Candidate, CandidateSession, Vacancy, VacancyAnalysis
+from app.db.models import (
+    Candidate,
+    CandidateSession,
+    Interview,
+    InterviewResponse,
+    Vacancy,
+    VacancyAnalysis,
+)
 from app.main import app
 from app.modules.auth.router import db_session
 from app.modules.vacancies import router as vacancy_router
@@ -32,6 +39,7 @@ def client(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'vacancies.db'}")
     Base.metadata.create_all(engine, tables=[
         Candidate.__table__, CandidateSession.__table__, Vacancy.__table__, VacancyAnalysis.__table__,
+        Interview.__table__, InterviewResponse.__table__,
     ])
 
     def session():
@@ -101,6 +109,41 @@ def test_public_ephemeral_and_authenticated_history(client, model):
     register(http, "otra@example.com")
     assert http.get(API).json() == []
     assert http.get(f"{API}/{vacancy_id}").status_code == 404
+
+
+def test_hiding_vacancy_requires_owner_and_preserves_interview(client, model):
+    http, engine = client
+    assert http.patch(f"{API}/1/hide").status_code == 401
+    register(http)
+    vacancy_id = http.post(f"{API}/analyze", json=INPUT).json()["id"]
+    with Session(engine) as db:
+        vacancy = db.get(Vacancy, vacancy_id)
+        interview = Interview(candidate_id=vacancy.candidate_id, vacancy_id=vacancy_id,
+                              status="completed", score=78, feedback="Buen resultado.")
+        db.add(interview)
+        db.flush()
+        interview_id = interview.id
+        db.add(InterviewResponse(interview_id=interview_id, question="¿React?", position=1))
+        db.commit()
+
+    register(http, "otra@example.com")
+    assert http.patch(f"{API}/{vacancy_id}/hide").status_code == 404
+    assert http.get(API).json() == []
+
+    assert http.post("/api/v1/auth/login", json={
+        "email": "ana@example.com", "password": "ClaveSegura1!",
+    }).status_code == 200
+    assert len(http.get(API).json()) == 1
+    assert http.patch(f"{API}/{vacancy_id}/hide").status_code == 204
+    assert http.get(API).json() == []
+    assert http.get(f"{API}/{vacancy_id}").status_code == 404
+    assert http.patch(f"{API}/{vacancy_id}/hide").status_code == 404
+    with Session(engine) as db:
+        assert db.get(Vacancy, vacancy_id).active is False
+        assert db.scalar(select(VacancyAnalysis).where(VacancyAnalysis.vacancy_id == vacancy_id)) is not None
+        assert db.get(Interview, interview_id).vacancy_id == vacancy_id
+        assert db.scalar(select(InterviewResponse).where(
+            InterviewResponse.interview_id == interview_id)) is not None
 
 
 def test_validation_missing_key_provider_failure_and_limits(client, model, monkeypatch):

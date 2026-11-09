@@ -75,6 +75,47 @@ def test_profile_documents_and_ownership(client):
     assert http.patch(f"{API}/resumes/{first.json()['id']}/primary").status_code == 404
 
 
+def test_hide_resume_requires_owner_preserves_file_and_promotes_primary(client):
+    http, engine = client
+    assert http.patch(f"{API}/resumes/1/hide").status_code == 401
+    register(http, "ana@example.com")
+    uploaded = [http.post(f"{API}/resumes", files={"file": (f"cv-{i}.pdf", pdf(),
+                                                        "application/pdf")}).json()
+                for i in range(3)]
+    first, second, third = uploaded
+    assert http.patch(f"{API}/resumes/{second['id']}/primary").status_code == 200
+    with Session(engine) as db:
+        original = db.get(Resume, second["id"])
+        path = settings.media_dir / original.storage_key
+    register(http, "otra@example.com")
+    assert http.patch(f"{API}/resumes/{second['id']}/hide").status_code == 404
+    assert http.get(f"{API}/resumes/{second['id']}/download").status_code == 404
+    assert http.post("/api/v1/auth/login", json={
+        "email": "ana@example.com", "password": "ClaveSegura1!",
+    }).status_code == 200
+
+    assert http.patch(f"{API}/resumes/{second['id']}/hide").status_code == 204
+    listed = http.get(f"{API}/resumes").json()
+    assert [item["id"] for item in listed] == [third["id"], first["id"]]
+    assert [item["is_primary"] for item in listed] == [True, False]
+    assert http.patch(f"{API}/resumes/{second['id']}/primary").status_code == 404
+    assert http.get(f"{API}/resumes/{second['id']}/download").status_code == 404
+    assert http.patch(f"{API}/resumes/{second['id']}/hide").status_code == 404
+    assert path.is_file()
+    with Session(engine) as db:
+        hidden = db.get(Resume, second["id"])
+        assert hidden.active is False
+        assert hidden.is_primary is False
+
+    assert http.patch(f"{API}/resumes/{first['id']}/hide").status_code == 204
+    assert http.get(f"{API}/resumes").json()[0]["is_primary"] is True
+    assert http.patch(f"{API}/resumes/{third['id']}/hide").status_code == 204
+    assert http.get(f"{API}/resumes").json() == []
+    replacement = http.post(f"{API}/resumes", files={"file": ("nuevo.pdf", pdf(),
+                                                          "application/pdf")})
+    assert replacement.json()["is_primary"] is True
+
+
 def test_file_validation_and_avatar(client):
     http, _ = client
     register(http, "ana@example.com")

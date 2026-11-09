@@ -3,15 +3,17 @@
 
 :root {
   font-family: "Geist", system-ui, sans-serif;
-  color: #0f172a;
-  background: #fafafb;
+  color: #1c2927;
+  background: #f5f7f5;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  --border: #e2e8f0;
-  --muted: #475569;
-  --blue: #3b82f6;
-  --cyan: #06b6d4;
+  --border: #dbe2de;
+  --muted: #50615b;
+  --blue: #176558;
+  --cyan: #176558;
+  --surface: #ffffff;
+  --soft-surface: #eef3f0;
 }
 * {
   box-sizing: border-box;
@@ -46,7 +48,7 @@ button:focus-visible,
 a:focus-visible,
 input:focus-visible,
 textarea:focus-visible {
-  outline: 3px solid #3b82f6;
+  outline: 3px solid #176558;
   outline-offset: 3px;
 }
 h1,

@@ -68,7 +68,7 @@ export function Modal({
       ref={ref}
       className="modal"
       aria-labelledby={titleId}
-      onCancel={onClose}
+      onCancel={(event) => { event.preventDefault(); onClose() }}
     >
       <h2 id={titleId}>{title}</h2>
       {children}

@@ -1,14 +1,17 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Asset, Header, Modal } from '../components/Design'
+import { useNotifications } from '../features/notifications-context'
 
-export function InterviewPage() {
+export function InterviewPreviewPage() {
+  const notifications = useNotifications()
   const [muted, setMuted] = useState(false)
   const [confirm, setConfirm] = useState(false)
   const [ended, setEnded] = useState(false)
   return (
     <>
       <Header title="Simulación de entrevista técnica" screen="interview" />
+      <p className="inline-notice interview-preview-notice">Vista previa: esta simulación no graba audio ni guarda entrevistas, notas o recomendaciones.</p>
       <div className="interview-session">
         <div className="selected-vacancy">
           <p>Vacante seleccionada</p>
@@ -30,8 +33,8 @@ export function InterviewPage() {
             >
               Volver a la simulación de ejemplo
             </button>
-            <Link className="example-link" to="/">
-              Volver al inicio
+            <Link className="example-link" to="/entrevistas">
+              Volver a mis entrevistas
             </Link>
           </section>
         ) : (
@@ -113,6 +116,7 @@ export function InterviewPage() {
             onClick={() => {
               setConfirm(false)
               setEnded(true)
+              notifications.info('Vista previa finalizada. No se guardó ninguna entrevista.')
             }}
           >
             Confirmar finalización

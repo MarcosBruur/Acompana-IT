@@ -114,8 +114,8 @@ def get_avatar(candidate: ActiveCandidate):
 
 @router.get("/resumes", response_model=list[ResumeOutput])
 def list_resumes(candidate: ActiveCandidate, db: Database):
-    return db.scalars(select(Resume).where(Resume.candidate_id == candidate.id)
-                      .order_by(Resume.uploaded_at.desc(), Resume.id.desc())).all()
+    return db.scalars(select(Resume).where(Resume.candidate_id == candidate.id, Resume.active.is_(True))
+                       .order_by(Resume.uploaded_at.desc(), Resume.id.desc())).all()
 
 
 @router.post("/resumes", response_model=ResumeOutput, status_code=201)
@@ -133,7 +133,8 @@ async def upload_resume(candidate: ActiveCandidate, db: Database, file: Annotate
     except (PdfReadError, ValueError, OSError, KeyError):
         raise HTTPException(422, "El archivo no es un PDF válido.") from None
     db.scalar(select(Candidate).where(Candidate.id == candidate.id).with_for_update())
-    has_primary = db.scalar(select(Resume.id).where(Resume.candidate_id == candidate.id, Resume.is_primary))
+    has_primary = db.scalar(select(Resume.id).where(Resume.candidate_id == candidate.id,
+                                                    Resume.active.is_(True), Resume.is_primary))
     key, path = destination("files", "pdf")
     resume = Resume(candidate_id=candidate.id, filename=filename, storage_key=key,
                     is_primary=has_primary is None)
@@ -152,11 +153,14 @@ async def upload_resume(candidate: ActiveCandidate, db: Database, file: Annotate
 @router.patch("/resumes/{resume_id}/primary", response_model=ResumeOutput)
 def make_primary(resume_id: int, candidate: ActiveCandidate, db: Database):
     db.scalar(select(Candidate).where(Candidate.id == candidate.id).with_for_update())
-    resume = db.scalar(select(Resume).where(Resume.id == resume_id, Resume.candidate_id == candidate.id))
+    resume = db.scalar(select(Resume).where(Resume.id == resume_id,
+                                            Resume.candidate_id == candidate.id,
+                                            Resume.active.is_(True)))
     if not resume:
         raise HTTPException(404, "Currículum no encontrado.")
-    db.execute(update(Resume).where(Resume.candidate_id == candidate.id, Resume.is_primary)
-               .values(is_primary=False))
+    db.execute(update(Resume).where(Resume.candidate_id == candidate.id, Resume.is_primary,
+                                    Resume.active.is_(True))
+                .values(is_primary=False))
     db.flush()
     resume.is_primary = True
     db.commit()
@@ -164,9 +168,32 @@ def make_primary(resume_id: int, candidate: ActiveCandidate, db: Database):
     return resume
 
 
+@router.patch("/resumes/{resume_id}/hide", status_code=204)
+def hide_resume(resume_id: int, candidate: ActiveCandidate, db: Database):
+    db.scalar(select(Candidate).where(Candidate.id == candidate.id).with_for_update())
+    resume = db.scalar(select(Resume).where(Resume.id == resume_id,
+                                            Resume.candidate_id == candidate.id,
+                                            Resume.active.is_(True)))
+    if not resume:
+        raise HTTPException(404, "Currículum no encontrado.")
+    was_primary = resume.is_primary
+    resume.active = False
+    resume.is_primary = False
+    db.flush()
+    if was_primary:
+        replacement = db.scalar(select(Resume).where(Resume.candidate_id == candidate.id,
+                                                    Resume.active.is_(True))
+                                .order_by(Resume.uploaded_at.desc(), Resume.id.desc()).limit(1))
+        if replacement:
+            replacement.is_primary = True
+    db.commit()
+
+
 @router.get("/resumes/{resume_id}/download")
 def download_resume(resume_id: int, candidate: ActiveCandidate, db: Database):
-    resume = db.scalar(select(Resume).where(Resume.id == resume_id, Resume.candidate_id == candidate.id))
+    resume = db.scalar(select(Resume).where(Resume.id == resume_id,
+                                            Resume.candidate_id == candidate.id,
+                                            Resume.active.is_(True)))
     if not resume:
         raise HTTPException(404, "Currículum no encontrado.")
     return FileResponse(stored_file(resume.storage_key, "files"), media_type="application/pdf",

@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { FieldError } from '../components/FieldError'
 import { useAuth } from '../features/auth-context'
+import { useNotifications } from '../features/notifications-context'
 import { required, validateConfirmation, validatePassword } from '../features/auth-validation'
 import { AuthRequestError, authRequest, type Candidate } from '../services/auth'
 
@@ -22,6 +23,7 @@ export function ChangePasswordPage() {
   const [formError, setFormError] = useState('')
   const [busy, setBusy] = useState(false)
   const { candidate, setCandidate } = useAuth()
+  const notifications = useNotifications()
   const navigate = useNavigate()
   const location = useLocation()
   const destination = (location.state as { from?: string } | null)?.from ?? '/'
@@ -77,6 +79,7 @@ export function ChangePasswordPage() {
         body: JSON.stringify(values),
       })
       setCandidate(result)
+      notifications.success('Contraseña actualizada correctamente.')
       navigate(destination, { replace: true })
     } catch (error) {
       if (error instanceof AuthRequestError) {

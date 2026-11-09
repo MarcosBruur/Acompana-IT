@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-do
 import { Asset } from '../components/Design'
 import { FieldError } from '../components/FieldError'
 import { useAuth } from '../features/auth-context'
+import { useNotifications } from '../features/notifications-context'
 import { required, validateConfirmation, validateEmail, validatePassword } from '../features/auth-validation'
 import { AuthRequestError, authRequest, googleLoginUrl, type Candidate } from '../services/auth'
 
@@ -29,6 +30,7 @@ export function AuthPage({ register = false }: { register?: boolean }) {
   const [busy, setBusy] = useState(false)
   const [googleAvailable, setGoogleAvailable] = useState(false)
   const { candidate, loading, setCandidate } = useAuth()
+  const notifications = useNotifications()
   const navigate = useNavigate()
   const location = useLocation()
   const [params, setParams] = useSearchParams()
@@ -83,6 +85,7 @@ export function AuthPage({ register = false }: { register?: boolean }) {
         } : { email: values.email.trim(), password: values.password }),
       })
       setCandidate(result)
+      notifications.success(register ? 'Cuenta creada correctamente.' : 'Sesión iniciada correctamente.')
       sessionStorage.removeItem('auth_return_to')
       navigate(result.password_expired ? '/cambiar-contrasena' : destination, { replace: true, state: { from: destination } })
     } catch (error) {
@@ -182,17 +185,16 @@ export function AuthPage({ register = false }: { register?: boolean }) {
           className="brand-panel"
           aria-label="Presentación de la plataforma"
         >
-          <Asset screen={screen} name="imgGlowOrbTeal" className="brand-teal" />
-          <Asset screen={screen} name="imgGlowOrbBlue" className="brand-blue" />
-          <Asset screen={screen} name="imgNodeMesh" className="brand-mesh" />
+          <Link className="auth-brand" to="/" aria-label="Acompañamiento IT, ir al inicio"><span className="brand-mark" aria-hidden="true">a.</span><span>acompaña<span className="brand-suffix"> / IT</span></span></Link>
           <div className="brand-copy">
+            <span className="brand-eyebrow">TU PRÓXIMO PASO EMPIEZA ACÁ</span>
             <h1>Tu carrera en tecnología comienza aquí</h1>
             <p>
-              Te acompañamos de inicio a fin. Prepárate para el mercado real con
-              simulacros de entrevista, orientación técnica, consejos prácticos
-              y recursos de aprendizaje.
+              Un espacio para analizar oportunidades, organizar tu perfil y avanzar
+              con más claridad hacia tu primera experiencia en tecnología.
             </p>
           </div>
+          <p className="brand-caption">UN LUGAR PARA CRECER A TU RITMO <span>ACOMPAÑAMIENTO IT</span></p>
         </section>
         <main className="auth-panel">
           <form className="auth-form" onSubmit={submit} noValidate>
@@ -201,7 +203,7 @@ export function AuthPage({ register = false }: { register?: boolean }) {
               <p>
                 {register
                   ? 'Comienza tu preparación uniéndote a la plataforma'
-                  : 'Ingresa tus credenciales para unirte a la plataforma'}
+                   : 'Ingresá a tu espacio y seguí construyendo tu camino.'}
               </p>
             </header>
             <div className="fields-stack">
@@ -253,6 +255,7 @@ export function AuthPage({ register = false }: { register?: boolean }) {
                       window.location.assign(googleLoginUrl())
                     }}
                   >
+                    <img className="google-icon" src="/google-g.svg" alt="" aria-hidden="true" />
                     Continuar con Google
                   </button>
                   {!googleAvailable && <small>El acceso con Google estará disponible cuando se configuren las credenciales OAuth.</small>}
