@@ -18,7 +18,7 @@ import { Asset, PreviewNotice, type DesignScreen } from './components/Design'
 import { Dashboard } from './pages/Dashboard'
 import { AuthPage } from './pages/AuthPage'
 import { VacancyPage, NewVacancyPage, AnalysisPage } from './pages/VacancyPage'
-import { InterviewPreviewPage } from './pages/InterviewPage'
+import { InterviewSetupPage, InterviewSessionPage } from './pages/InterviewPage'
 import { InterviewHistoryPage, InterviewResultPage } from './pages/InterviewHistoryPage'
 import { ModulePage } from './pages/ModulePage'
 import { ChangePasswordPage } from './pages/ChangePasswordPage'
@@ -118,7 +118,8 @@ function App() {
           <Route path="/vacantes/analisis" element={<AnalysisPage />} />
           <Route path="/vacantes/:id/analisis" element={<AnalysisPage />} />
            <Route path="/entrevistas" element={<RequireAccount><InterviewHistoryPage /></RequireAccount>} />
-           <Route path="/entrevistas/nueva" element={<RequireAccount><InterviewPreviewPage /></RequireAccount>} />
+            <Route path="/entrevistas/nueva" element={<RequireAccount><InterviewSetupPage /></RequireAccount>} />
+            <Route path="/entrevistas/:id/simulacion" element={<RequireAccount><InterviewSessionPage /></RequireAccount>} />
            <Route path="/entrevistas/:id" element={<RequireAccount><InterviewResultPage /></RequireAccount>} />
           {modules
             .filter((module) =>

@@ -126,6 +126,15 @@ export function InterviewResultPage() {
           <section className="panel"><h2>Competencias a reforzar</h2>
             {result.skills_to_improve.length ? <ul className="interview-skills">{result.skills_to_improve.map((skill, index) => <li key={`${skill}-${index}`}>{skill}</li>)}</ul> : <p>No se registraron competencias a reforzar.</p>}
           </section>
+          {result.questions.some((question) => question.verdict !== null) && <section className="panel"><h2>Respuestas: {result.correct_count} correctas · {result.partial_count} parciales · {result.incorrect_count} incorrectas</h2>
+            <p>Cada parcial suma medio punto. {result.unanswered_count} sin responder (incluidas entre las incorrectas). La nota contempla todas las preguntas.</p>
+            <ol className="interview-result-questions">{result.questions.map((question) => <li key={question.id}>
+              <h3>{question.question}</h3><p><strong>{question.answer === null ? 'Sin respuesta' : question.verdict === 'correcta' ? 'Correcta' : question.verdict === 'parcial' ? 'Parcial (0,5 puntos)' : 'Incorrecta'}</strong> · Tu respuesta: {question.answer === null ? 'No respondida' : question.options ? question.options[Number(question.answer)] : question.answer}</p>
+              {question.options && question.correct_index !== null && <p>Respuesta correcta: {question.options[question.correct_index]}</p>}
+              {question.explanation && <p>{question.explanation}</p>}
+            </li>)}</ol>
+          </section>}
+          {result.resources.length > 0 && <section className="panel"><h2>Recursos gratuitos para seguir aprendiendo</h2><ul className="interview-resources">{result.resources.map((resource) => <li key={resource.url}><a href={resource.url} target="_blank" rel="noopener noreferrer">{resource.title} ↗</a></li>)}</ul></section>}
         </div>}
   </>
 }

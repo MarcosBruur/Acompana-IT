@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 
 from app.core.config import settings
+from app.core.llm import invalid_request_detail
 from app.db.models import Candidate, CandidateSession, Vacancy, VacancyAnalysis
 from app.modules.auth.router import COOKIE, Database, expired, token_digest
 from app.modules.vacancies.analysis import Finding, analyze_offer
@@ -144,6 +145,9 @@ async def analyze(data: VacancyInput, request: Request, db: Database, candidate:
         except Exception as exc:  # noqa: BLE001 — no filtrar errores/datos del proveedor al cliente.
             logger.warning("Falló el análisis de OpenAI: tipo=%s estado=%s",
                            type(exc).__name__, getattr(exc, "status_code", None))
+            detail = invalid_request_detail(exc, "vacantes")
+            if detail:
+                raise HTTPException(503, detail) from None
             raise HTTPException(502, "No se pudo analizar la oferta en este momento. Intentá de nuevo.") from None
     finally:
         _capacity.release()
@@ -185,7 +189,7 @@ def history(candidate: OptionalCandidate, db: Database):
         raise HTTPException(401, "Iniciá sesión para consultar tus análisis.")
     rows = db.scalars(select(Vacancy).where(Vacancy.candidate_id == candidate.id,
                                            Vacancy.active.is_(True))
-                      .order_by(Vacancy.created_at.desc(), Vacancy.id.desc()).limit(30)).all()
+                       .order_by(Vacancy.created_at.desc(), Vacancy.id.desc())).all()
     return [VacancySummary(id=row.id, title=row.title, company=row.company,
                            created_at=row.created_at,
                            risk_percentage=row.analysis.risk_percentage if row.analysis else None)

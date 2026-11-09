@@ -132,13 +132,18 @@ class Interview(Base):
     id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
     candidate_id: Mapped[int] = mapped_column(ForeignKey("candidates.id", ondelete="CASCADE"))
     vacancy_id: Mapped[int] = mapped_column(ForeignKey("vacancies.id", ondelete="CASCADE"))
+    resume_id: Mapped[int | None] = mapped_column(ForeignKey("resumes.id", ondelete="SET NULL"))
+    mode: Mapped[str] = mapped_column(String(20), nullable=False, default="conversation",
+                                      server_default=text("'conversation'"))
     status: Mapped[str] = mapped_column(String(30), default="in_progress")
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
     score: Mapped[int | None] = mapped_column(Integer)
     feedback: Mapped[str | None] = mapped_column(Text)
     skills_to_improve: Mapped[list | None] = mapped_column(JSONB)
+    resources: Mapped[list | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     vacancy: Mapped[Vacancy] = relationship()
+    resume: Mapped[Resume | None] = relationship()
     responses: Mapped[list["InterviewResponse"]] = relationship(back_populates="interview")
 
 
@@ -150,6 +155,12 @@ class InterviewResponse(Base):
     question: Mapped[str] = mapped_column(Text)
     answer: Mapped[str | None] = mapped_column(Text)
     position: Mapped[int] = mapped_column(Integer)
+    topic: Mapped[str | None] = mapped_column(String(150))
+    options: Mapped[list | None] = mapped_column(JSONB)
+    correct_index: Mapped[int | None] = mapped_column(Integer)
+    reference_answer: Mapped[str | None] = mapped_column(Text)
+    verdict: Mapped[str | None] = mapped_column(String(20))
+    explanation: Mapped[str | None] = mapped_column(Text)
     interview: Mapped[Interview] = relationship(back_populates="responses")
 
 

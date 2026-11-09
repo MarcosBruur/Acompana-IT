@@ -5,6 +5,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, field_validator
 
 from app.core.config import settings
+from app.core.llm import chat_options
 
 
 class Finding(BaseModel):
@@ -84,10 +85,8 @@ Descripción:
 
 
 async def analyze_offer(title: str, company: str | None, description: str) -> VacancyExtraction:
-    model = ChatOpenAI(
-        model=settings.openai_model, api_key=settings.openai_api_key, temperature=0,
-        max_tokens=2000, timeout=30, max_retries=0,
-    ).with_structured_output(VacancyExtraction, method="json_schema", strict=True)
+    model = ChatOpenAI(**chat_options(settings.vacancy_model, max_tokens=2000, timeout=30)
+                       ).with_structured_output(VacancyExtraction, method="json_schema", strict=True)
     result = await (PROMPT | model).ainvoke({
         "title": title, "company": company or "No indicada", "description": description,
     })

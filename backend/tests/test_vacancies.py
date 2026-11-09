@@ -3,7 +3,7 @@ from collections import deque
 import pytest
 from fastapi.testclient import TestClient
 from httpx import Request, Response
-from openai import AuthenticationError, RateLimitError
+from openai import AuthenticationError, BadRequestError, RateLimitError
 from sqlalchemy import create_engine, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
@@ -189,6 +189,24 @@ def test_provider_configuration_errors_have_actionable_safe_messages(client, mon
     assert response.status_code == 503
     assert detail in response.json()["detail"]
     assert str(error) not in response.text
+
+
+def test_unsupported_model_parameter_returns_safe_actionable_error(client, monkeypatch):
+    http, _ = client
+    error = BadRequestError(
+        "secret-provider-response", response=Response(
+            400, request=Request("POST", "https://api.openai.com/v1/chat/completions")),
+        body={"param": "temperature", "code": "unsupported_value"},
+    )
+
+    async def failure(*_args):
+        raise error
+
+    monkeypatch.setattr(vacancy_router, "analyze_offer", failure)
+    response = http.post(f"{API}/analyze", json=INPUT)
+    assert response.status_code == 503
+    assert "parámetros" in response.json()["detail"]
+    assert "secret-provider-response" not in response.text
 
 
 def test_extraction_rejects_values_that_do_not_fit_database():

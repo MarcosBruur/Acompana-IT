@@ -13,8 +13,20 @@ class Settings(BaseSettings):
     media_dir: Path = Path(__file__).resolve().parents[1] / "media"
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
+    openai_vacancy_model: str | None = None
+    openai_interview_model: str | None = None
+    openai_voice_model: str = "gpt-realtime-2.1-mini"
+    openai_voice: str = "marin"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def vacancy_model(self) -> str:
+        return self.openai_vacancy_model or self.openai_model
+
+    @property
+    def interview_model(self) -> str:
+        return self.openai_interview_model or self.openai_model
 
 
 settings = Settings()

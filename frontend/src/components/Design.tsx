@@ -81,7 +81,7 @@ export function Modal({
 export function PreviewNotice() {
   return (
     <p className="preview-notice">
-      Algunas vistas aún contienen datos de ejemplo · Comparaciones y voz pendientes de integración.
+      Algunas vistas aún contienen datos de ejemplo · Comparaciones pendientes de integración.
     </p>
   )
 }
