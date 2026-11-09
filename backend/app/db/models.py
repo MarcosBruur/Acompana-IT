@@ -1,10 +1,11 @@
-"""Esquema inicial; se ampliará al implementar cada historia de usuario."""
+"""Modelos del dominio y restricciones de integridad."""
 
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Identity,
@@ -59,8 +60,11 @@ class GoogleIdentity(Base):
 
 class Resume(Base):
     __tablename__ = "resumes"
-    __table_args__ = (Index("uq_resumes_primary_candidate", "candidate_id", unique=True,
-                            postgresql_where=text("is_primary"), sqlite_where=text("is_primary")),)
+    __table_args__ = (
+        Index("uq_resumes_primary_candidate", "candidate_id", unique=True,
+              postgresql_where=text("is_primary"), sqlite_where=text("is_primary")),
+        Index("ix_resumes_candidate_active_recent", "candidate_id", "active", "uploaded_at", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
     candidate_id: Mapped[int] = mapped_column(ForeignKey("candidates.id", ondelete="CASCADE"))
@@ -75,6 +79,8 @@ class Resume(Base):
 
 class Vacancy(Base):
     __tablename__ = "vacancies"
+    __table_args__ = (Index("ix_vacancies_candidate_active_recent", "candidate_id", "active",
+                            "created_at", "id"),)
 
     id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
     candidate_id: Mapped[int | None] = mapped_column(ForeignKey("candidates.id", ondelete="CASCADE"))
@@ -128,6 +134,15 @@ class Comparison(Base):
 
 class Interview(Base):
     __tablename__ = "interviews"
+    __table_args__ = (
+        Index("uq_interviews_ongoing_candidate", "candidate_id", unique=True,
+              postgresql_where=text("status = 'in_progress'"),
+              sqlite_where=text("status = 'in_progress'")),
+        Index("ix_interviews_candidate_active_recent", "candidate_id", "active", "created_at", "id"),
+        CheckConstraint("mode IN ('conversation', 'multiple_choice')", name="ck_interviews_mode"),
+        CheckConstraint("status IN ('in_progress', 'completed', 'cancelled')", name="ck_interviews_status"),
+        CheckConstraint("score IS NULL OR score BETWEEN 0 AND 100", name="ck_interviews_score"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
     candidate_id: Mapped[int] = mapped_column(ForeignKey("candidates.id", ondelete="CASCADE"))
@@ -149,6 +164,14 @@ class Interview(Base):
 
 class InterviewResponse(Base):
     __tablename__ = "interview_responses"
+    __table_args__ = (
+        Index("uq_interview_responses_position", "interview_id", "position", unique=True),
+        CheckConstraint("position > 0", name="ck_interview_responses_position"),
+        CheckConstraint("correct_index IS NULL OR correct_index BETWEEN 0 AND 3",
+                        name="ck_interview_responses_correct_index"),
+        CheckConstraint("verdict IS NULL OR verdict IN ('correcta', 'parcial', 'incorrecta')",
+                        name="ck_interview_responses_verdict"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
     interview_id: Mapped[int] = mapped_column(ForeignKey("interviews.id", ondelete="CASCADE"))

@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.rate_limit import SlidingWindow
 from app.db.models import Candidate, CandidateSession, GoogleIdentity
 from app.db.session import SessionLocal
 
@@ -27,6 +28,15 @@ hasher = PasswordHasher()
 COOKIE = "candidate_session"
 SESSION_LIFETIME = timedelta(days=7)
 PASSWORD_LIFETIME = timedelta(days=200)
+_auth_limit = SlidingWindow()
+
+
+def limit_auth(request: Request, action: str, email: str | None = None) -> None:
+    host = request.client.host if request.client else "unknown"
+    if not _auth_limit.check(f"{action}:ip:{host}", 200 if action == "register" else 120):
+        raise HTTPException(429, "Demasiados intentos. Intentá de nuevo más tarde.")
+    if email and not _auth_limit.check(f"{action}:account:{token_digest(email)}", 10):
+        raise HTTPException(429, "Demasiados intentos. Intentá de nuevo más tarde.")
 
 
 def db_session():
@@ -149,7 +159,7 @@ def current_session(request: Request, db: Database) -> CandidateSession:
     token = request.cookies.get(COOKIE)
     session = db.scalar(select(CandidateSession).where(CandidateSession.token_hash == token_digest(token))) if token else None
     expires_at = session.expires_at.replace(tzinfo=UTC) if session and session.expires_at.tzinfo is None else session.expires_at if session else None
-    if not session or expires_at <= datetime.now(UTC):
+    if not session or expires_at <= datetime.now(UTC) or not session.candidate.active:
         raise HTTPException(401, "Iniciá sesión para continuar.")
     return session
 
@@ -167,8 +177,9 @@ ActiveCandidate = Annotated[Candidate, Depends(active_candidate)]
 
 
 @router.post("/register", response_model=CandidateOutput, status_code=201)
-def register(data: RegisterInput, response: Response, db: Database):
+def register(data: RegisterInput, request: Request, response: Response, db: Database):
     email = str(data.email).lower()
+    limit_auth(request, "register", email)
     if db.scalar(select(Candidate.id).where(Candidate.email == email)):
         raise HTTPException(409, "Ya existe una cuenta con ese correo.")
     candidate = Candidate(
@@ -183,19 +194,23 @@ def register(data: RegisterInput, response: Response, db: Database):
     except IntegrityError:
         db.rollback()
         raise HTTPException(409, "Ya existe una cuenta con ese correo.") from None
+    _auth_limit.clear(f"register:account:{token_digest(email)}")
     create_session(db, response, candidate)
     return public_candidate(candidate)
 
 
 @router.post("/login", response_model=CandidateOutput)
-def login(data: LoginInput, response: Response, db: Database):
-    candidate = db.scalar(select(Candidate).where(Candidate.email == str(data.email).lower()))
+def login(data: LoginInput, request: Request, response: Response, db: Database):
+    email = str(data.email).lower()
+    limit_auth(request, "login", email)
+    candidate = db.scalar(select(Candidate).where(Candidate.email == email, Candidate.active.is_(True)))
     try:
         verified = bool(candidate and candidate.password_hash and hasher.verify(candidate.password_hash, data.password))
     except (VerifyMismatchError, InvalidHashError):
         verified = False
     if not verified:
         raise HTTPException(401, "Correo o contraseña incorrectos.")
+    _auth_limit.clear(f"login:account:{token_digest(email)}")
     create_session(db, response, candidate)
     return public_candidate(candidate)
 
@@ -217,8 +232,10 @@ def logout(request: Request, response: Response, db: Database):
 
 
 @router.post("/change-password", response_model=CandidateOutput)
-def change_password(data: ChangePasswordInput, response: Response, db: Database, session: SessionDependency):
+def change_password(data: ChangePasswordInput, request: Request, response: Response,
+                    db: Database, session: SessionDependency):
     candidate = session.candidate
+    limit_auth(request, "change-password", candidate.email)
     if not candidate.password_hash:
         raise HTTPException(400, "Esta cuenta usa Google para iniciar sesión.")
     try:
@@ -233,6 +250,7 @@ def change_password(data: ChangePasswordInput, response: Response, db: Database,
         raise HTTPException(401, "La contraseña actual es incorrecta.")
     if is_previous:
         raise HTTPException(422, "La nueva contraseña debe ser distinta de la anterior.")
+    _auth_limit.clear(f"change-password:account:{token_digest(candidate.email)}")
     candidate.password_hash = hasher.hash(data.new_password)
     candidate.password_changed_at = datetime.now(UTC)
     db.query(CandidateSession).filter(CandidateSession.candidate_id == candidate.id).delete()
@@ -299,6 +317,8 @@ async def google_callback(request: Request, db: Database):
         identity = db.scalar(select(GoogleIdentity).where(GoogleIdentity.google_sub == str(profile["sub"])))
         if identity:
             candidate = identity.candidate
+            if not candidate.active:
+                return RedirectResponse(error_redirect)
         else:
             # No vincular automáticamente cuentas locales por email: requiere prueba de posesión de ambas.
             if db.scalar(select(Candidate.id).where(Candidate.email == email)):

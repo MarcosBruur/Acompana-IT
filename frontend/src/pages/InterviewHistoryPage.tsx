@@ -104,7 +104,10 @@ export function InterviewResultPage() {
   useEffect(() => {
     let active = true
     const interviewId = Number(id)
-    if (!Number.isSafeInteger(interviewId) || interviewId <= 0) return
+    if (!Number.isSafeInteger(interviewId) || interviewId <= 0) {
+      queueMicrotask(() => { if (active) { setError('Entrevista no encontrada.'); setLoading(false) } })
+      return () => { active = false }
+    }
     getInterview(interviewId)
       .then((item) => { if (active) setResult(item) })
       .catch((reason: Error) => { if (active) setError(reason.message) })

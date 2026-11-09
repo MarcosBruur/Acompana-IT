@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { authRequest, type Candidate } from '../services/auth'
 import { AuthContext } from './auth-context'
+import { clearTransientAnalysis } from '../services/vacancies'
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
@@ -25,6 +26,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   async function logout() {
     await authRequest<void>('/logout', { method: 'POST' })
+    clearTransientAnalysis()
     setCandidate(null)
   }
 

@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.llm import invalid_request_detail
+from app.core.rate_limit import prune_buckets
 from app.db.models import Candidate, CandidateSession, Vacancy, VacancyAnalysis
 from app.modules.auth.router import COOKIE, Database, expired, token_digest
 from app.modules.vacancies.analysis import Finding, analyze_offer
@@ -24,6 +25,7 @@ WINDOW_SECONDS = 3600
 _requests: dict[str, deque[float]] = defaultdict(deque)
 _rate_lock = asyncio.Lock()
 _capacity = asyncio.Semaphore(3)
+_last_cleanup = 0.0
 
 
 class VacancyInput(BaseModel):
@@ -80,7 +82,7 @@ def optional_candidate(request: Request, db: Database) -> Candidate | None:
     expires_at = session.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
-    if expires_at <= datetime.now(UTC) or expired(session.candidate):
+    if expires_at <= datetime.now(UTC) or not session.candidate.active or expired(session.candidate):
         return None
     return session.candidate
 
@@ -89,8 +91,14 @@ OptionalCandidate = Annotated[Candidate | None, Depends(optional_candidate)]
 
 
 async def check_limit(key: str, limit: int) -> None:
+    global _last_cleanup
     async with _rate_lock:
         now = monotonic()
+        if now - _last_cleanup >= 60:
+            prune_buckets(_requests, now, WINDOW_SECONDS)
+            _last_cleanup = now
+        if key not in _requests and len(_requests) >= 30000:
+            raise HTTPException(429, "El servicio está ocupado. Volvé a intentarlo más tarde.")
         times = _requests[key]
         while times and times[0] <= now - WINDOW_SECONDS:
             times.popleft()
@@ -99,9 +107,25 @@ async def check_limit(key: str, limit: int) -> None:
         times.append(now)
 
 
+async def refund_limit(key: str) -> None:
+    async with _rate_lock:
+        times = _requests.get(key)
+        if times:
+            times.pop()
+            if not times:
+                del _requests[key]
+
+
 def supported_findings(findings: list[Finding], source: str) -> list[Finding]:
     normalized = " ".join(source.casefold().split())
-    return [finding for finding in findings if " ".join(finding.evidence.casefold().split()) in normalized]
+    seen: set[str] = set()
+    supported: list[Finding] = []
+    for finding in findings:
+        evidence = " ".join(finding.evidence.casefold().split())
+        if evidence in normalized and evidence not in seen:
+            seen.add(evidence)
+            supported.append(finding)
+    return supported
 
 
 def as_result(vacancy: Vacancy, analysis: VacancyAnalysis) -> VacancyResult:
@@ -121,14 +145,19 @@ async def analyze(data: VacancyInput, request: Request, db: Database, candidate:
     if not settings.openai_api_key:
         raise HTTPException(503, "El análisis con IA aún no está configurado. Configurá OPENAI_API_KEY.")
     key = f"user:{candidate.id}" if candidate else f"ip:{request.client.host if request.client else 'unknown'}"
+    candidate_id = candidate.id if candidate else None
     await check_limit(key, 30 if candidate else 10)
     if _capacity.locked():
+        await refund_limit(key)
         raise HTTPException(429, "El servicio está ocupado. Volvé a intentarlo en unos momentos.")
+    # La autenticación ya se resolvió; no retener una transacción durante la espera externa.
+    db.rollback()
     await _capacity.acquire()
     try:
         try:
             extraction = await analyze_offer(data.title, data.company, data.description)
         except RateLimitError as exc:
+            await refund_limit(key)
             logger.warning("OpenAI rechazó el análisis: tipo=%s estado=%s cuota_agotada=%s",
                            type(exc).__name__, exc.status_code,
                            exc.code == "credit_balance_exhausted")
@@ -138,11 +167,13 @@ async def analyze(data: VacancyInput, request: Request, db: Database, candidate:
             raise HTTPException(503, "OpenAI alcanzó su límite de solicitudes. "
                                 "Volvé a intentarlo más tarde.") from None
         except AuthenticationError as exc:
+            await refund_limit(key)
             logger.warning("OpenAI rechazó la clave configurada: tipo=%s estado=%s",
                            type(exc).__name__, exc.status_code)
             raise HTTPException(503, "La clave de OpenAI configurada no es válida. "
                                 "Revisá OPENAI_API_KEY en el backend.") from None
         except Exception as exc:  # noqa: BLE001 — no filtrar errores/datos del proveedor al cliente.
+            await refund_limit(key)
             logger.warning("Falló el análisis de OpenAI: tipo=%s estado=%s",
                            type(exc).__name__, getattr(exc, "status_code", None))
             detail = invalid_request_detail(exc, "vacantes")
@@ -155,6 +186,9 @@ async def analyze(data: VacancyInput, request: Request, db: Database, candidate:
     source = f"{data.title} {data.company or ''} {data.description}"
     inconsistencies = supported_findings(extraction.inconsistencies, source)
     signals = supported_findings(extraction.risk_signals, source)
+    # Un mismo fragmento no suma dos veces aunque se clasifique en ambas listas.
+    used = {" ".join(item.evidence.casefold().split()) for item in inconsistencies}
+    signals = [item for item in signals if " ".join(item.evidence.casefold().split()) not in used]
     # Indicador explicable sobre alertas respaldadas por texto, no compatibilidad con un CV.
     weights = {"alta": 30, "media": 15, "baja": 5}
     percentage = min(100, sum(weights[item.relevance] for item in inconsistencies + signals))
@@ -162,8 +196,11 @@ async def analyze(data: VacancyInput, request: Request, db: Database, candidate:
         title=data.title, company=data.company, **extraction.model_dump(exclude={"inconsistencies", "risk_signals"}),
         inconsistencies=inconsistencies, risk_signals=signals, risk_percentage=percentage,
     )
-    if candidate:
-        vacancy = Vacancy(candidate_id=candidate.id, title=data.title,
+    if candidate_id is not None:
+        if not db.scalar(select(Candidate.id).where(Candidate.id == candidate_id,
+                                                    Candidate.active.is_(True))):
+            raise HTTPException(401, "Iniciá sesión para guardar el análisis.")
+        vacancy = Vacancy(candidate_id=candidate_id, title=data.title,
                           company=data.company, description=data.description)
         db.add(vacancy)
         db.flush()

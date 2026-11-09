@@ -6,6 +6,7 @@ import { useAuth } from '../features/auth-context'
 import { useNotifications } from '../features/notifications-context'
 import { required, validateConfirmation, validateEmail, validatePassword } from '../features/auth-validation'
 import { AuthRequestError, authRequest, googleLoginUrl, type Candidate } from '../services/auth'
+import { clearTransientAnalysis } from '../services/vacancies'
 
 type FieldName = 'name' | 'surname' | 'email' | 'password' | 'confirm'
 type Values = Record<FieldName, string>
@@ -84,6 +85,7 @@ export function AuthPage({ register = false }: { register?: boolean }) {
           confirm_password: values.confirm,
         } : { email: values.email.trim(), password: values.password }),
       })
+      clearTransientAnalysis()
       setCandidate(result)
       notifications.success(register ? 'Cuenta creada correctamente.' : 'Sesión iniciada correctamente.')
       sessionStorage.removeItem('auth_return_to')

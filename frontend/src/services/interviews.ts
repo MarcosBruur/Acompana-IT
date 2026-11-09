@@ -1,4 +1,4 @@
-const BASE = import.meta.env.VITE_API_URL ?? '/api/v1'
+import { apiRequest } from './api'
 
 export type InterviewSummary = {
   id: number
@@ -41,12 +41,7 @@ export type InterviewSession = {
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${BASE}/interviews${path}`, { ...options, credentials: 'include' })
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}))
-    throw new Error(typeof body.detail === 'string' ? body.detail : 'No se pudo completar la solicitud. Intentá de nuevo.')
-  }
-  return response.status === 204 ? undefined as T : response.json() as Promise<T>
+  return apiRequest<T>(`/interviews${path}`, options)
 }
 
 export const getInterviews = () => request<InterviewSummary[]>('')

@@ -1,4 +1,4 @@
-const BASE = import.meta.env.VITE_API_URL ?? '/api/v1'
+import { apiRequest } from './api'
 
 export type Finding = {
   title: string
@@ -27,15 +27,10 @@ export type VacancySummary = Pick<VacancyResult, 'id' | 'title' | 'company' | 'c
 let transientAnalysis: VacancyResult | null = null
 export function setTransientAnalysis(result: VacancyResult) { transientAnalysis = result }
 export function getTransientAnalysis() { return transientAnalysis }
+export function clearTransientAnalysis() { transientAnalysis = null }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${BASE}/vacancies${path}`, { ...options, credentials: 'include' })
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}))
-    const detail = body.detail
-    throw new Error(typeof detail === 'string' ? detail : 'No se pudo completar el análisis. Intentá de nuevo.')
-  }
-  return response.status === 204 ? undefined as T : response.json() as Promise<T>
+  return apiRequest<T>(`/vacancies${path}`, options, 'No se pudo completar el análisis. Intentá de nuevo.')
 }
 
 export function analyzeVacancy(data: { title: string; company: string | null; description: string }) {

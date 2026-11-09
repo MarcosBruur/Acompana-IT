@@ -4,7 +4,7 @@ import { Asset, Header, Modal } from '../components/Design'
 import { useAuth } from '../features/auth-context'
 import { useNotifications } from '../features/notifications-context'
 import type { Candidate } from '../services/auth'
-import { hideResume, listResumes, saveNickname, selectPrimary, uploadFile, validatePdf, type Resume } from '../services/profile'
+import { hideResume, listResumes, resumeDownloadUrl, saveNickname, selectPrimary, uploadFile, validatePdf, type Resume } from '../services/profile'
 
 const SIDE = 256
 
@@ -192,7 +192,7 @@ export function ProfilePage() {
         </div>
       </section>
       <div className="profile-resumes">
-        <p className="intro">Tu CV se utilizará para comparar tu perfil con las oportunidades laborales y evaluar tu compatibilidad.</p>
+        <p className="intro">Guardá tus CV de forma privada y elegí uno principal para personalizar entrevistas. La comparación con vacantes se incorporará próximamente.</p>
         <section className="panel upload-panel"><h2>Cargá tu currículum</h2>
           <div className={`dropzone ${dragging ? 'dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true) }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false) }} onDrop={(event) => { event.preventDefault(); setDragging(false); void addResume(event.dataTransfer.files[0]) }}>
             <Asset screen="resume" name="imgUploadIcon" />
@@ -202,11 +202,11 @@ export function ProfilePage() {
           </div>
         </section>
         <section className="panel current-cv"><div className="cv-heading"><h2>Currículum principal</h2>{primary && <span className="pill green">Principal</span>}</div>
-          {primary ? <div className="file-details"><div className="pdf-badge"><Asset screen="resume" name="imgFile1" /><span>PDF</span></div><div className="file-meta"><strong>{primary.filename}</strong><p>Fecha de carga: {new Date(primary.uploaded_at).toLocaleDateString('es-AR')}</p></div><button className="secondary profile-delete" type="button" disabled={busy} aria-label={`Eliminar currículum ${primary.filename}`} onClick={() => { setRemoveError(''); setSelectedResume(primary) }}><TrashIcon aria-hidden="true" />Eliminar</button></div> : <p>Tu currículum principal aparecerá aquí cuando cargues un PDF.</p>}
+          {primary ? <div className="file-details"><div className="pdf-badge"><Asset screen="resume" name="imgFile1" /><span>PDF</span></div><div className="file-meta"><strong>{primary.filename}</strong><p>Fecha de carga: {new Date(primary.uploaded_at).toLocaleDateString('es-AR')}</p></div><div className="profile-cv-actions"><a className="secondary" href={resumeDownloadUrl(primary.id)}>Descargar PDF</a><button className="secondary profile-delete" type="button" disabled={busy} aria-label={`Eliminar currículum ${primary.filename}`} onClick={() => { setRemoveError(''); setSelectedResume(primary) }}><TrashIcon aria-hidden="true" />Eliminar</button></div></div> : <p>Tu currículum principal aparecerá aquí cuando cargues un PDF.</p>}
         </section>
         {others.length > 0 && <section className="profile-other-cvs" aria-label="Otros currículums"><h2>Otros currículums</h2>
           <ul className="profile-cv-list">{others.map((resume) => <li className="panel current-cv" key={resume.id}>
-            <div className="file-details"><div className="pdf-badge"><Asset screen="resume" name="imgFile1" /><span>PDF</span></div><div className="file-meta"><strong>{resume.filename}</strong><p>Fecha de carga: {new Date(resume.uploaded_at).toLocaleDateString('es-AR')}</p></div><div className="profile-cv-actions"><button className="secondary" type="button" disabled={busy} onClick={() => void makePrimary(resume.id)}>Elegir como principal</button><button className="secondary profile-delete" type="button" disabled={busy} aria-label={`Eliminar currículum ${resume.filename}`} onClick={() => { setRemoveError(''); setSelectedResume(resume) }}><TrashIcon aria-hidden="true" />Eliminar</button></div></div>
+            <div className="file-details"><div className="pdf-badge"><Asset screen="resume" name="imgFile1" /><span>PDF</span></div><div className="file-meta"><strong>{resume.filename}</strong><p>Fecha de carga: {new Date(resume.uploaded_at).toLocaleDateString('es-AR')}</p></div><div className="profile-cv-actions"><a className="secondary" href={resumeDownloadUrl(resume.id)}>Descargar PDF</a><button className="secondary" type="button" disabled={busy} onClick={() => void makePrimary(resume.id)}>Elegir como principal</button><button className="secondary profile-delete" type="button" disabled={busy} aria-label={`Eliminar currículum ${resume.filename}`} onClick={() => { setRemoveError(''); setSelectedResume(resume) }}><TrashIcon aria-hidden="true" />Eliminar</button></div></div>
           </li>)}</ul>
         </section>}
       </div>

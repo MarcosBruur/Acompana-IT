@@ -97,8 +97,8 @@ export function Dashboard() {
           <div className="empty-state interview-empty">
             <span className="empty-state-symbol" aria-hidden="true">◎</span>
             <h3>Tu práctica empieza acá</h3>
-            <p>La simulación de entrevistas todavía está en preparación. Pronto vas a poder practicar desde este espacio.</p>
-            <Link className="card-action" to="/entrevistas">Conocer el módulo <span aria-hidden="true">→</span></Link>
+            <p>Respondé preguntas técnicas basadas en una vacante y consultá tus resultados cuando termines.</p>
+            <Link className="card-action" to="/entrevistas">Practicar ahora <span aria-hidden="true">→</span></Link>
           </div>
         </section>
       </div>

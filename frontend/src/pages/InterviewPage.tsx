@@ -223,7 +223,10 @@ export function InterviewSessionPage() {
   useEffect(() => {
     let mounted = true
     const interviewId = Number(id)
-    if (!Number.isSafeInteger(interviewId) || interviewId <= 0) return
+    if (!Number.isSafeInteger(interviewId) || interviewId <= 0) {
+      queueMicrotask(() => { if (mounted) { setError('Entrevista no encontrada.'); setLoading(false) } })
+      return () => { mounted = false }
+    }
     getInterviewSession(interviewId)
       .then((data) => { if (mounted) {
         setSession(data)
@@ -263,10 +266,20 @@ export function InterviewSessionPage() {
     if (session?.mode !== 'conversation') return
     let mounted = true
     const realtime = new RealtimeVoice({
-      onStatus: (status) => { if (mounted) setVoiceStatus(status) },
+       onStatus: (status) => {
+         if (!mounted) return
+         setVoiceStatus(status)
+         if (status === 'blocked') {
+           voice.current?.close()
+           voice.current = null
+           setVoiceOn(false)
+           startPresentation(true)
+           setVoiceError('El navegador bloqueó el audio. La entrevista continúa por texto; podés reactivar la voz.')
+         }
+       },
       onPlaybackStart: () => { if (mounted) startPresentation() },
       onTranscript: (delta) => { if (mounted && presentation.current) presentation.current.transcript += delta.length },
-      onPlaybackEnd: () => { if (mounted) clearPresentation() },
+       onPlaybackEnd: () => { if (mounted && !presentation.current?.fallback) clearPresentation() },
       onSpeaking: (isSpeaking) => {
         speaking.current = isSpeaking
         if (isSpeaking) recognition.current?.stop()

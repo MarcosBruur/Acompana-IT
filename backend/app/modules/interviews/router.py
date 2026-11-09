@@ -15,11 +15,13 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
 from app.core.llm import invalid_request_detail
-from app.db.models import Interview, InterviewResponse, Resume, Vacancy
+from app.core.rate_limit import prune_buckets
+from app.db.models import Candidate, Interview, InterviewResponse, Resume, Vacancy
 from app.modules.auth.router import ActiveCandidate, Database
 from app.modules.interviews.simulation import (
     contains_literal_code,
@@ -36,6 +38,8 @@ _attempts: dict[int, deque[float]] = defaultdict(deque)
 _attempt_lock = asyncio.Lock()
 _voice_attempts: dict[int, deque[float]] = defaultdict(deque)
 _voice_lock = asyncio.Lock()
+_attempt_cleanup = 0.0
+_voice_cleanup = 0.0
 
 
 class InterviewSummary(BaseModel):
@@ -182,60 +186,101 @@ def active_interview(candidate: ActiveCandidate, db: Database):
 
 @router.post("", response_model=InterviewSession, status_code=201)
 async def start(data: StartInput, candidate: ActiveCandidate, db: Database):
+    global _attempt_cleanup
+    candidate_id = candidate.id
     if not settings.openai_api_key:
         raise HTTPException(503, "La simulación con IA aún no está configurada. Configurá OPENAI_API_KEY.")
     vacancy = db.scalar(select(Vacancy).where(
-        Vacancy.id == data.vacancy_id, Vacancy.candidate_id == candidate.id,
+        Vacancy.id == data.vacancy_id, Vacancy.candidate_id == candidate_id,
         Vacancy.active.is_(True)))
     if vacancy is None or vacancy.analysis is None:
         raise HTTPException(404, "Elegí una vacante analizada y activa de tu cuenta.")
     existing = db.scalar(select(Interview.id).where(
-        Interview.candidate_id == candidate.id, Interview.status == "in_progress"))
+        Interview.candidate_id == candidate_id, Interview.status == "in_progress"))
     if existing is not None:
         raise HTTPException(409, "Ya tenés una entrevista en curso. Retomala o cancelala antes de iniciar otra.")
     resume = None
     text = ""
     if data.use_resume:
         resume = db.scalar(select(Resume).where(
-            Resume.candidate_id == candidate.id, Resume.is_primary.is_(True),
+            Resume.candidate_id == candidate_id, Resume.is_primary.is_(True),
             Resume.active.is_(True)))
         if resume is None:
             raise HTTPException(422, "Establecé un CV principal activo en tu perfil o iniciá sin CV.")
-        text = await run_in_threadpool(resume_text, resume)
     recent = db.scalar(select(func.count(Interview.id)).where(
-        Interview.candidate_id == candidate.id,
+        Interview.candidate_id == candidate_id,
         Interview.created_at >= datetime.now(UTC) - timedelta(hours=1)))
     if recent and recent >= 10:
         raise HTTPException(429, "Alcanzaste el límite de entrevistas por hora. Intentá más tarde.")
     async with _attempt_lock:
-        times = _attempts[candidate.id]
         now = monotonic()
+        if now - _attempt_cleanup >= 60:
+            prune_buckets(_attempts, now)
+            _attempt_cleanup = now
+        if candidate_id not in _attempts and len(_attempts) >= 30000:
+            raise HTTPException(429, "El servicio está ocupado. Intentá más tarde.")
+        times = _attempts[candidate_id]
         while times and times[0] <= now - 3600:
             times.popleft()
         if len(times) >= 10:
             raise HTTPException(429, "Alcanzaste el límite de intentos por hora. Intentá más tarde.")
         times.append(now)
     if _capacity.locked():
+        async with _attempt_lock:
+            _attempts[candidate_id].pop()
         raise HTTPException(429, "El servicio está ocupado. Intentá en unos momentos.")
+    title, description = vacancy.title, vacancy.description
+    resume_id = resume.id if resume else None
+    if resume:
+        db.expunge(resume)
+    db.rollback()
+    if resume:
+        try:
+            text = await run_in_threadpool(resume_text, resume)
+        except Exception:
+            async with _attempt_lock:
+                _attempts[candidate_id].pop()
+            raise
     await _capacity.acquire()
     try:
         try:
-            generated = await generate_questions(vacancy.title, vacancy.description, text, data.mode)
+            generated = await generate_questions(title, description, text, data.mode)
         except Exception as exc:  # noqa: BLE001 — no exponer respuestas o contenido del proveedor.
+            async with _attempt_lock:
+                _attempts[candidate_id].pop()
             raise provider_error(exc) from None
     finally:
         _capacity.release()
-    interview = Interview(candidate_id=candidate.id, vacancy_id=vacancy.id,
-                          resume_id=resume.id if resume else None, mode=data.mode,
+    if not db.scalar(select(Candidate).where(
+        Candidate.id == candidate_id, Candidate.active.is_(True)).with_for_update()):
+        raise HTTPException(401, "Iniciá sesión para continuar.")
+    vacancy = db.scalar(select(Vacancy).where(
+        Vacancy.id == data.vacancy_id, Vacancy.candidate_id == candidate_id,
+        Vacancy.active.is_(True)))
+    if vacancy is None or vacancy.analysis is None:
+        raise HTTPException(404, "Elegí una vacante analizada y activa de tu cuenta.")
+    if resume_id is not None and not db.scalar(select(Resume.id).where(
+        Resume.id == resume_id, Resume.candidate_id == candidate_id,
+        Resume.active.is_(True), Resume.is_primary.is_(True))):
+        raise HTTPException(409, "Tu CV principal cambió durante la preparación. Intentá de nuevo.")
+    if db.scalar(select(Interview.id).where(
+        Interview.candidate_id == candidate_id, Interview.status == "in_progress")):
+        raise HTTPException(409, "Ya tenés una entrevista en curso. Retomala antes de iniciar otra.")
+    interview = Interview(candidate_id=candidate_id, vacancy_id=vacancy.id,
+                          resume_id=resume_id, mode=data.mode,
                           status="in_progress")
-    db.add(interview)
-    db.flush()
-    for position, item in enumerate(generated.questions, start=1):
-        db.add(InterviewResponse(interview_id=interview.id, position=position,
-                                 question=item.question, topic=item.topic, options=item.options or None,
-                                 correct_index=item.correct_index,
-                                 reference_answer=item.reference_answer))
-    db.commit()
+    try:
+        db.add(interview)
+        db.flush()
+        for position, item in enumerate(generated.questions, start=1):
+            db.add(InterviewResponse(interview_id=interview.id, position=position,
+                                     question=item.question, topic=item.topic, options=item.options or None,
+                                     correct_index=item.correct_index,
+                                     reference_answer=item.reference_answer))
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "Ya tenés una entrevista en curso. Retomala antes de iniciar otra.") from None
     db.refresh(interview)
     return as_session(interview)
 
@@ -248,6 +293,7 @@ def session(interview_id: int, candidate: ActiveCandidate, db: Database):
 @router.post("/{interview_id}/voice-token", response_model=VoiceToken)
 async def voice_token(interview_id: int, candidate: ActiveCandidate, db: Database,
                       response: Response):
+    global _voice_cleanup
     interview = ongoing(interview_id, candidate.id, db)
     if interview.mode != "conversation":
         raise HTTPException(409, "La voz solo está disponible en entrevistas conversacionales.")
@@ -257,13 +303,20 @@ async def voice_token(interview_id: int, candidate: ActiveCandidate, db: Databas
                                     "shimmer", "verse", "marin", "cedar"}:
         raise HTTPException(503, "Configurá una voz de OpenAI válida en OPENAI_VOICE.")
     async with _voice_lock:
-        attempts = _voice_attempts[candidate.id]
         now = monotonic()
+        if now - _voice_cleanup >= 60:
+            prune_buckets(_voice_attempts, now)
+            _voice_cleanup = now
+        if candidate.id not in _voice_attempts and len(_voice_attempts) >= 30000:
+            raise HTTPException(429, "El servicio está ocupado. Probá más tarde.")
+        attempts = _voice_attempts[candidate.id]
         while attempts and attempts[0] <= now - 3600:
             attempts.popleft()
         if len(attempts) >= 8:
             raise HTTPException(429, "Alcanzaste el límite de conexiones de voz. Probá más tarde.")
         attempts.append(now)
+    candidate_id = candidate.id
+    db.rollback()
     try:
         async with httpx.AsyncClient(timeout=12) as client:
             token_response = await client.post(
@@ -271,7 +324,7 @@ async def voice_token(interview_id: int, candidate: ActiveCandidate, db: Databas
                 headers={
                     "Authorization": f"Bearer {settings.openai_api_key}",
                     "OpenAI-Safety-Identifier": hashlib.sha256(
-                        f"candidate:{candidate.id}".encode()).hexdigest(),
+                        f"candidate:{candidate_id}".encode()).hexdigest(),
                 },
                 json=voice_session_config(),
             )
@@ -280,6 +333,8 @@ async def voice_token(interview_id: int, candidate: ActiveCandidate, db: Databas
             if not isinstance(token, str) or not token:
                 raise ValueError("Token efímero inválido.")
     except (httpx.HTTPError, KeyError, ValueError) as exc:
+        async with _voice_lock:
+            _voice_attempts[candidate_id].pop()
         logger.warning("No se pudo iniciar voz Realtime: tipo=%s estado=%s",
                        type(exc).__name__, getattr(getattr(exc, "response", None), "status_code", None))
         raise HTTPException(503, "La voz con IA no está disponible. Podés continuar por escrito.") from None
@@ -303,11 +358,12 @@ def save_choice(interview_id: int, question_id: int, data: ChoiceInput,
 
 @router.post("/{interview_id}/questions/{question_id}/answer", response_model=InterviewSession)
 async def answer_conversation(interview_id: int, question_id: int, data: AnswerInput,
-                              candidate: ActiveCandidate, db: Database):
+                               candidate: ActiveCandidate, db: Database):
+    candidate_id = candidate.id
     answer = data.answer.strip()
     if not answer:
         raise HTTPException(422, "Escribí o dictá una respuesta antes de enviarla.")
-    interview = ongoing(interview_id, candidate.id, db)
+    interview = ongoing(interview_id, candidate_id, db)
     if interview.mode != "conversation":
         raise HTTPException(409, "Esta entrevista no es conversacional.")
     questions = sorted(interview.responses, key=lambda item: item.position)
@@ -316,26 +372,28 @@ async def answer_conversation(interview_id: int, question_id: int, data: AnswerI
         raise HTTPException(409, "Esta pregunta ya fue respondida o no es la pregunta actual.")
     if _capacity.locked():
         raise HTTPException(429, "El servicio está ocupado. Intentá en unos momentos.")
+    previous = [item for item in questions if item.position < current.position and item.answer]
+    context = "\n".join(
+        f"Pregunta: {item.question[:180]} | Respuesta: {item.answer[:200]}"
+        for item in previous[-2:]
+    )
+    evaluation_input = (current.question, current.reference_answer or "",
+                        interview.vacancy.title, interview.vacancy.description, current.topic or "")
+    db.rollback()
     await _capacity.acquire()
     try:
         try:
-            previous = [item for item in questions if item.position < current.position and item.answer]
-            context = "\n".join(
-                f"Pregunta: {item.question[:180]} | Respuesta: {item.answer[:200]}"
-                for item in previous[-2:]
-            )
             evaluated = await evaluate_answer(
-                current.question, current.reference_answer or "", answer,
-                vacancy_title=interview.vacancy.title,
-                vacancy_description=interview.vacancy.description,
-                topic=current.topic or "", previous=context,
+                evaluation_input[0], evaluation_input[1], answer,
+                vacancy_title=evaluation_input[2], vacancy_description=evaluation_input[3],
+                topic=evaluation_input[4], previous=context,
             )
         except Exception as exc:  # noqa: BLE001 — no exponer respuestas o contenido del proveedor.
             raise provider_error(exc) from None
     finally:
         _capacity.release()
     # Volver a comprobar bajo bloqueo: dos envíos simultáneos no pueden cambiar una respuesta ya guardada.
-    interview = ongoing(interview_id, candidate.id, db, lock=True)
+    interview = ongoing(interview_id, candidate_id, db, lock=True)
     current = next((item for item in interview.responses if item.id == question_id), None)
     if current is None or current.verdict is not None or any(
         item.position < current.position and item.verdict is None for item in interview.responses
@@ -372,7 +430,10 @@ def finish(interview_id: int, candidate: ActiveCandidate, db: Database):
     correct = sum(item.verdict == "correcta" for item in questions)
     partial = sum(item.verdict == "parcial" for item in questions)
     missed = list(dict.fromkeys(item.topic for item in questions
-                                if item.verdict != "correcta" and item.topic))
+                                if item.verdict != "correcta" and item.topic
+                                and (interview.mode != "conversation" or not contains_literal_code(item.topic))))
+    if not missed and correct != len(questions):
+        missed = ["Fundamentos de la vacante"]
     interview.score = round(100 * (correct + partial / 2) / len(questions))
     interview.skills_to_improve = missed[:6]
     interview.resources = learning_resources(missed)

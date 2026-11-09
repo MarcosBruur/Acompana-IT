@@ -1,21 +1,16 @@
 import type { Candidate } from './auth'
-
-const BASE = import.meta.env.VITE_API_URL ?? '/api/v1'
+import { API_BASE_URL, apiRequest } from './api'
 
 export type Resume = { id: number; filename: string; uploaded_at: string; is_primary: boolean }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${BASE}/profile${path}`, { credentials: 'include', ...options })
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}))
-    throw new Error(typeof body.detail === 'string' ? body.detail : 'No se pudo completar la solicitud.')
-  }
-  return response.status === 204 ? undefined as T : response.json() as Promise<T>
+  return apiRequest<T>(`/profile${path}`, options, 'No se pudo completar la solicitud.')
 }
 
 export const listResumes = () => request<Resume[]>('/resumes')
 export const selectPrimary = (id: number) => request<Resume>(`/resumes/${id}/primary`, { method: 'PATCH' })
 export const hideResume = (id: number) => request<void>(`/resumes/${id}/hide`, { method: 'PATCH' })
+export const resumeDownloadUrl = (id: number) => `${API_BASE_URL}/profile/resumes/${id}/download`
 export const saveNickname = (nickname: string) => request<Candidate>('', {
   method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ nickname }),
 })

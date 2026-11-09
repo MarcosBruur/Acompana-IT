@@ -121,11 +121,7 @@ function App() {
             <Route path="/entrevistas/nueva" element={<RequireAccount><InterviewSetupPage /></RequireAccount>} />
             <Route path="/entrevistas/:id/simulacion" element={<RequireAccount><InterviewSessionPage /></RequireAccount>} />
            <Route path="/entrevistas/:id" element={<RequireAccount><InterviewResultPage /></RequireAccount>} />
-          {modules
-            .filter((module) =>
-              ['/comparaciones', '/aprendizaje'].includes(module.path),
-            )
-            .map((module) => (
+          {modules.map((module) => (
               <Route
                 key={module.path}
                 path={module.path}

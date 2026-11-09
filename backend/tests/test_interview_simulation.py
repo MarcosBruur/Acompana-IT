@@ -74,11 +74,15 @@ def test_multiple_choice_private_questions_early_finish_and_hidden_vacancy(tmp_p
         VacancyAnalysis.__table__, Interview.__table__, InterviewResponse.__table__,
     ])
 
+    sessions = []
+
     def session():
         with Session(engine) as db:
+            sessions.append(db)
             yield db
 
     async def generate(_title, _description, _resume, mode):
+        assert not sessions[-1].in_transaction()
         return questions(mode)
 
     monkeypatch.setattr(interview_router.settings, "openai_api_key", "test-key")
@@ -140,8 +144,11 @@ def test_conversation_correction_resume_and_cancel(tmp_path, monkeypatch):
         VacancyAnalysis.__table__, Interview.__table__, InterviewResponse.__table__,
     ])
 
+    sessions = []
+
     def session():
         with Session(engine) as db:
+            sessions.append(db)
             yield db
 
     received_resume = []
@@ -153,6 +160,7 @@ def test_conversation_correction_resume_and_cancel(tmp_path, monkeypatch):
     evaluation_contexts = []
 
     async def evaluate(_question, _reference, _answer, **context):
+        assert not sessions[-1].in_transaction()
         evaluation_contexts.append(context)
         return Evaluation(verdict="incorrecta", explanation="No es correcto; Python usa funciones y pruebas.")
 
@@ -187,6 +195,7 @@ def test_conversation_correction_resume_and_cancel(tmp_path, monkeypatch):
             original_client = httpx.AsyncClient
 
             def token_request(request):
+                assert not sessions[-1].in_transaction()
                 requests.append(request)
                 assert request.url.path == "/v1/realtime/client_secrets"
                 payload = json.loads(request.content)
@@ -303,6 +312,8 @@ def test_conversation_full_and_partial_answers_score_without_model_reply(tmp_pat
             assert incorrect["verdict"] == "incorrecta"
             with Session(engine) as db:
                 db.get(InterviewResponse, ids[3]).reference_answer = "cursor.execute('SELECT id FROM usuarios')"
+                for question_id in ids:
+                    db.get(InterviewResponse, question_id).topic = "cursor.execute('SELECT ...')"
                 db.commit()
             final = client.post(f"{API}/{interview_id}/finish").json()
             assert final["correct_count"] == 1
@@ -314,6 +325,8 @@ def test_conversation_full_and_partial_answers_score_without_model_reply(tmp_pat
             assert "cursor.execute" not in final["questions"][3]["explanation"]
             assert not simulation.contains_literal_code(final["questions"][3]["explanation"])
             assert "medio punto" in final["feedback"]
+            assert "cursor.execute" not in final["feedback"]
+            assert final["skills_to_improve"] == ["Fundamentos de la vacante"]
             assert client.get(f"{API}/{interview_id}").json()["partial_count"] == 1
             with Session(engine) as db:
                 assert db.get(InterviewResponse, ids[0]).explanation is None
@@ -401,3 +414,27 @@ def test_persistent_code_in_feedback_is_not_returned(monkeypatch):
             vacancy_title="Backend Python", vacancy_description="Python y PostgreSQL",
             topic="Validación", previous="",
         ))
+
+
+def test_database_allows_only_one_pending_interview_per_candidate(tmp_path):
+    from sqlalchemy.exc import IntegrityError
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'integrity.db'}")
+    Base.metadata.create_all(engine, tables=[Candidate.__table__, Vacancy.__table__,
+                                                 Interview.__table__])
+    try:
+        with Session(engine) as db:
+            candidate = Candidate(email="ana@example.com", first_name="Ana", last_name="Pérez")
+            db.add(candidate)
+            db.flush()
+            vacancy = Vacancy(candidate_id=candidate.id, title="Python", description="Vacante")
+            db.add(vacancy)
+            db.flush()
+            db.add(Interview(candidate_id=candidate.id, vacancy_id=vacancy.id))
+            db.commit()
+            db.add(Interview(candidate_id=candidate.id, vacancy_id=vacancy.id))
+            with pytest.raises(IntegrityError):
+                db.commit()
+            db.rollback()
+    finally:
+        engine.dispose()

@@ -219,3 +219,23 @@ def test_extraction_rejects_values_that_do_not_fit_database():
         )
     with pytest.raises(ValidationError):
         Finding(title="Alerta", explanation="Explicación", relevance="alta", evidence="a")
+
+
+def test_risk_score_does_not_count_the_same_evidence_twice(client, monkeypatch):
+    http, _ = client
+
+    async def duplicates(*_args):
+        finding = Finding(title="Guardias", explanation="Condición a revisar.",
+                          relevance="alta", evidence="guardias sin compensación")
+        return VacancyExtraction(
+            seniority="Junior", experience_required="", technologies=[], required_skills=[],
+            responsibilities=[], summary="", inconsistencies=[finding, finding],
+            risk_signals=[finding],
+        )
+
+    monkeypatch.setattr(vacancy_router, "analyze_offer", duplicates)
+    result = http.post(f"{API}/analyze", json=INPUT)
+    assert result.status_code == 200
+    assert result.json()["risk_percentage"] == 30
+    assert len(result.json()["inconsistencies"]) == 1
+    assert result.json()["risk_signals"] == []

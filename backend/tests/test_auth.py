@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.db.base import Base
 from app.db.models import Candidate, CandidateSession, GoogleIdentity
 from app.main import app
-from app.modules.auth.router import db_session, hasher
+from app.modules.auth.router import _auth_limit, db_session, hasher
 
 API = "/api/v1/auth"
 PASSWORD = "ClaveSegura1!"
@@ -42,6 +42,7 @@ def register(client, email="persona@example.com"):
 
 def test_register_login_logout_and_hash(client):
     http, engine = client
+    assert http.get("/api/v1/ready").json() == {"status": "ok"}
     response = register(client)
     assert response.status_code == 201
     assert response.json()["role"] == "candidato"
@@ -252,3 +253,30 @@ def test_google_does_not_link_existing_local_account(client, monkeypatch):
     assert callback.headers["location"].endswith("google_error=linked")
     with Session(engine) as db:
         assert db.scalar(select(GoogleIdentity)) is None
+
+
+def test_inactive_candidate_cannot_use_existing_session_or_log_in(client):
+    http, engine = client
+    assert register(client).status_code == 201
+    with Session(engine) as db:
+        candidate = db.scalar(select(Candidate))
+        candidate.active = False
+        db.commit()
+    assert http.get(f"{API}/me").status_code == 401
+    assert http.post(f"{API}/login", json={"email": "persona@example.com",
+                                        "password": PASSWORD}).status_code == 401
+
+
+def test_failed_logins_are_limited_per_account(client):
+    http, _ = client
+    assert register(client).status_code == 201
+    key = "login:account:" + hashlib.sha256(b"persona@example.com").hexdigest()
+    _auth_limit.clear(key)
+    try:
+        for _ in range(10):
+            assert http.post(f"{API}/login", json={"email": "persona@example.com",
+                                                "password": "incorrecta"}).status_code == 401
+        assert http.post(f"{API}/login", json={"email": "persona@example.com",
+                                            "password": PASSWORD}).status_code == 429
+    finally:
+        _auth_limit.clear(key)

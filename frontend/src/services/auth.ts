@@ -1,4 +1,4 @@
-const API_BASE_URL = import.meta.env.VITE_API_URL ?? '/api/v1'
+import { API_BASE_URL, ApiRequestError, apiRequest } from './api'
 
 export type Candidate = {
   id: number
@@ -28,14 +28,13 @@ export class AuthRequestError extends Error {
 }
 
 export async function authRequest<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}/auth${path}`, {
-    ...options,
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-  })
-  if (!response.ok) {
-    const body: { detail?: unknown } = await response.json().catch(() => ({}))
-    const detail = body.detail
+  try {
+    return await apiRequest<T>(`/auth${path}`, {
+      ...options, headers: { 'Content-Type': 'application/json', ...options?.headers },
+    })
+  } catch (error) {
+    if (!(error instanceof ApiRequestError)) throw error
+    const detail = error.detail
     if (Array.isArray(detail)) {
       const fieldErrors: Record<string, string> = {}
       for (const item of detail) {
@@ -52,9 +51,8 @@ export async function authRequest<T>(path: string, options?: RequestInit): Promi
           fieldErrors[field] = item.msg.replace(/^Value error, /, '')
         }
       }
-      throw new AuthRequestError('Revisá los campos marcados.', response.status, fieldErrors)
+      throw new AuthRequestError('Revisá los campos marcados.', error.status, fieldErrors)
     }
-    throw new AuthRequestError(typeof detail === 'string' ? detail : 'No se pudo completar la solicitud. Intentá de nuevo.', response.status)
+    throw new AuthRequestError(error.message, error.status)
   }
-  return response.status === 204 ? undefined as T : response.json() as Promise<T>
 }
