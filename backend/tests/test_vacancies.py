@@ -1,4 +1,5 @@
 from collections import deque
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -83,6 +84,31 @@ def model(monkeypatch):
 
     monkeypatch.setattr(vacancy_router, "analyze_offer", fake)
     return calls
+
+
+def test_active_vacancy_quota_before_ai_and_admin_exemption(client, model):
+    http, engine = client
+    register(http, "cupos@example.com")
+    with Session(engine) as db:
+        owner = db.scalar(select(Candidate).where(Candidate.email == "cupos@example.com"))
+        offers = [Vacancy(candidate_id=owner.id, title=f"Oferta {i}", description="Oferta")
+                  for i in range(20)]
+        db.add_all(offers)
+        db.flush()
+        db.add_all([VacancyAnalysis(vacancy_id=offer.id) for offer in offers])
+        db.commit()
+        hidden_id = db.scalar(select(Vacancy.id).where(Vacancy.candidate_id == owner.id))
+    blocked = http.post(f"{API}/analyze", json=INPUT)
+    assert blocked.status_code == 409
+    assert "20 vacantes" in blocked.json()["detail"]
+    assert model == []
+    assert http.patch(f"{API}/{hidden_id}/hide").status_code == 204
+    assert http.post(f"{API}/analyze", json=INPUT).status_code == 200
+    with Session(engine) as db:
+        owner = db.scalar(select(Candidate).where(Candidate.email == "cupos@example.com"))
+        owner.admin = True
+        db.commit()
+    assert http.post(f"{API}/analyze", json=INPUT).status_code == 200
 
 
 def test_public_ephemeral_and_authenticated_history(client, model):
@@ -239,3 +265,25 @@ def test_risk_score_does_not_count_the_same_evidence_twice(client, monkeypatch):
     assert result.json()["risk_percentage"] == 30
     assert len(result.json()["inconsistencies"]) == 1
     assert result.json()["risk_signals"] == []
+
+
+def test_vacancy_history_uses_private_keyset_pagination(client):
+    http, engine = client
+    register(http)
+    with Session(engine) as db:
+        candidate = db.scalar(select(Candidate).where(Candidate.email == "ana@example.com"))
+        db.add_all([Vacancy(candidate_id=candidate.id, title=f"Oferta {i}",
+                            description="Vacante de prueba",
+                            created_at=datetime.now(UTC) - timedelta(minutes=i))
+                    for i in range(24)])
+        db.commit()
+    first = http.get(f"{API}?limit=20").json()
+    assert len(first) == 20
+    anchor = first[-1]["id"]
+    assert http.patch(f"{API}/{anchor}/hide").status_code == 204
+    second = http.get(f"{API}?before={anchor}&limit=20").json()
+    assert len(second) == 4
+    assert {item["id"] for item in first}.isdisjoint(item["id"] for item in second)
+    assert http.get(f"{API}?limit=101").status_code == 422
+    register(http, "otra@example.com")
+    assert http.get(f"{API}?before={anchor}").status_code == 404

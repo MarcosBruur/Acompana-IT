@@ -1,4 +1,4 @@
-import { getInterviewVoiceToken } from './interviews'
+import { API_BASE_URL } from './api'
 
 type VoiceEvents = {
   onStatus: (status: 'connecting' | 'ready' | 'speaking' | 'blocked') => void
@@ -9,169 +9,144 @@ type VoiceEvents = {
   onError: () => void
 }
 
-/** La conexión solo recibe audio: el micrófono permanece en el dictado del navegador. */
+type SpokenPart = { key: string; text: string }
+
+/** El navegador recibe audio; el servidor selecciona el texto autorizado desde la DB. */
 export class RealtimeVoice {
+  private socket: WebSocket | null = null
+  private context: AudioContext | null = null
+  private sources = new Set<AudioBufferSourceNode>()
+  private nextTime = 0
+  private pending: { keys: string[]; onFinished?: () => void } | null = null
+  private onFinished: (() => void) | null = null
   private events: VoiceEvents
-  private pc: RTCPeerConnection | null = null
-  private channel: RTCDataChannel | null = null
-  private audio: HTMLAudioElement | null = null
-  private abort = new AbortController()
   private closed = false
   private active = false
-  private generating = false
-  private responseId: string | null = null
-  private pending: string | null = null
-  private pendingFinished: (() => void) | null = null
-  private onFinished: (() => void) | null = null
-  private lastText: string | null = null
-  private blocked = false
+  private finishedGenerating = false
+  private playbackStarted = false
 
   constructor(events: VoiceEvents) { this.events = events }
 
   async connect(interviewId: number) {
-    if (!('RTCPeerConnection' in window)) throw new Error('WebRTC no disponible')
+    if (!('WebSocket' in window) || !('AudioContext' in window)) throw new Error('Audio no disponible')
     this.events.onStatus('connecting')
-    const { value } = await getInterviewVoiceToken(interviewId)
-    if (this.closed) return
-    const pc = new RTCPeerConnection()
-    this.pc = pc
-    pc.addTransceiver('audio', { direction: 'recvonly' })
-    const audio = document.createElement('audio')
-    audio.autoplay = true
-    this.audio = audio
-    pc.ontrack = (event) => {
-      audio.srcObject = event.streams[0] ?? new MediaStream([event.track])
-      void audio.play().catch(() => { if (!this.closed) { this.blocked = true; this.events.onStatus('blocked') } })
-    }
-    pc.onconnectionstatechange = () => {
-      if (!this.closed && (pc.connectionState === 'failed' || pc.connectionState === 'closed')) this.fail()
-    }
-    const channel = pc.createDataChannel('oai-events')
-    this.channel = channel
-    channel.onopen = () => {
-      if (this.closed) return
-      this.events.onStatus(this.blocked ? 'blocked' : 'ready')
-      if (this.pending) {
-        const text = this.pending
-        const onFinished = this.pendingFinished ?? undefined
-        this.pending = null
-        this.pendingFinished = null
-        this.speak(text, onFinished)
+    const url = new URL(`${API_BASE_URL}/interviews/${interviewId}/voice`, window.location.href)
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    const socket = new WebSocket(url)
+    this.socket = socket
+    await new Promise<void>((resolve, reject) => {
+      let ready = false
+      const timer = window.setTimeout(() => { if (!ready) { socket.close(); reject(new Error('La voz tardó demasiado')) } }, 15000)
+      socket.onmessage = (event: MessageEvent<string>) => {
+        if (this.closed) return
+        try {
+          const message = JSON.parse(event.data) as { type: string; delta?: string; failed?: boolean }
+          if (message.type === 'ready') {
+            ready = true; clearTimeout(timer); resolve()
+            this.events.onStatus('ready')
+            if (this.pending) {
+              const pending = this.pending
+              this.pending = null
+              this.send(pending.keys, pending.onFinished)
+            }
+          } else if (message.type === 'audio' && message.delta) {
+            this.playChunk(message.delta)
+          } else if (message.type === 'transcript' && message.delta) {
+            this.events.onTranscript(message.delta)
+          } else if (message.type === 'done') {
+            if (message.failed) { this.fail(); return }
+            this.finishedGenerating = true
+            this.completeIfPlayed()
+          } else if (message.type === 'error') this.fail()
+        } catch { this.fail() }
       }
-    }
-    channel.onclose = () => { if (!this.closed) this.fail() }
-    channel.onmessage = (event: MessageEvent<string>) => {
-      if (this.closed) return
-      try {
-        const message = JSON.parse(event.data) as { type?: string; response_id?: string; delta?: string; response?: { id?: string; status?: string } }
-        if (message.type === 'response.created') {
-          this.responseId = message.response?.id ?? null
-          return
-        }
-        if (message.response_id && message.response_id !== this.responseId) return
-        if (message.type === 'output_audio_buffer.started') {
-          this.events.onPlaybackStart()
-          this.events.onStatus(this.blocked ? 'blocked' : 'speaking')
-        } else if (message.type === 'response.output_audio_transcript.delta' && message.delta) {
-          this.events.onTranscript(message.delta)
-        } else if (message.type === 'output_audio_buffer.stopped' || message.type === 'output_audio_buffer.cleared') {
-          if (message.type === 'output_audio_buffer.stopped') this.events.onPlaybackEnd()
-          this.active = false
-          this.events.onSpeaking(false)
-          this.events.onStatus(this.blocked ? 'blocked' : 'ready')
-          if (message.type === 'output_audio_buffer.stopped' && !this.blocked) {
-            const onFinished = this.onFinished
-            this.onFinished = null
-            onFinished?.()
-          }
-        } else if (message.type === 'response.done') {
-          if (message.response?.id === this.responseId) {
-            this.generating = false
-            if (message.response?.status === 'failed') this.fail()
-          }
-        } else if (message.type === 'error') {
-          this.fail()
-        }
-      } catch { /* Ignorar eventos desconocidos sin exponer contenido del proveedor. */ }
-    }
-
-    const timeout = setTimeout(() => this.abort.abort(), 20000)
-    try {
-      const offer = await pc.createOffer()
-      if (this.closed) return
-      await pc.setLocalDescription(offer)
-      const answer = await fetch('https://api.openai.com/v1/realtime/calls', {
-        method: 'POST', body: offer.sdp,
-        headers: { Authorization: `Bearer ${value}`, 'Content-Type': 'application/sdp' },
-        signal: this.abort.signal,
-      })
-      if (!answer.ok) throw new Error('No se pudo establecer la conexión de audio')
-      const sdp = await answer.text()
-      if (this.closed) return
-      await pc.setRemoteDescription({ type: 'answer', sdp })
-      await new Promise<void>((resolve, reject) => {
-        if (channel.readyState === 'open') { resolve(); return }
-        const onOpen = () => { clearTimeout(wait); resolve() }
-        const wait = setTimeout(() => {
-          channel.removeEventListener('open', onOpen)
-          reject(new Error('La conexión de voz tardó demasiado'))
-        }, 12000)
-        channel.addEventListener('open', onOpen, { once: true })
-      })
-    } finally { clearTimeout(timeout) }
+      socket.onerror = () => { if (!ready) { clearTimeout(timer); reject(new Error('No se pudo conectar la voz')) } else this.fail() }
+      socket.onclose = () => { if (!this.closed) {
+        if (!ready) { clearTimeout(timer); reject(new Error('No se pudo conectar la voz')) }
+        else this.fail()
+      } }
+    })
   }
 
-  speak(text: string, onFinished?: () => void) {
-    if (this.closed || !text.trim()) return
-    this.lastText = text
-    if (this.channel?.readyState !== 'open') {
-      this.pending = text
-      this.pendingFinished = onFinished ?? null
+  speak(parts: SpokenPart[], onFinished?: () => void) {
+    if (this.closed || !parts.length) return
+    const keys = parts.map((part) => part.key)
+    if (this.socket?.readyState !== WebSocket.OPEN) {
+      this.pending = { keys, onFinished }
       return
     }
+    this.send(keys, onFinished)
+  }
+
+  private send(keys: string[], onFinished?: () => void) {
     this.stop()
-    this.onFinished = onFinished ?? null
     this.active = true
-    this.generating = true
-    this.responseId = null
+    this.finishedGenerating = false
+    this.onFinished = onFinished ?? null
     this.events.onSpeaking(true)
-    this.events.onStatus(this.blocked ? 'blocked' : 'ready')
-    if (this.audio?.srcObject) void this.audio.play().catch(() => { this.blocked = true; this.events.onStatus('blocked') })
-    this.channel.send(JSON.stringify({
-      type: 'response.create',
-      response: {
-        conversation: 'none', output_modalities: ['audio'], max_output_tokens: 2000,
-        // response.create.instructions reemplaza las instrucciones de la sesión en esta intervención.
-        instructions: 'Leé literalmente el texto proporcionado en español rioplatense de Argentina, con acento argentino natural y sutil. Mantené una entonación cálida, pausas breves y ritmo conversacional; no exageres el acento ni cambies de idioma. No agregues comentarios ni cambies la corrección.',
-        input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: text.slice(0, 1400) }] }],
-      },
-    }))
+    this.socket?.send(JSON.stringify({ type: 'speak', keys }))
+  }
+
+  private playChunk(base64: string) {
+    if (!this.active) return
+    if (!this.context) this.context = new AudioContext({ sampleRate: 24000 })
+    const context = this.context
+    if (context.state !== 'running') {
+      void context.resume().catch(() => { if (!this.closed) this.events.onStatus('blocked') })
+      window.setTimeout(() => { if (!this.closed && this.active && context.state !== 'running') this.events.onStatus('blocked') }, 1200)
+    }
+    const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0))
+    if (bytes.length < 2 || bytes.length % 2) return
+    const samples = new Int16Array(bytes.length / 2)
+    const view = new DataView(bytes.buffer)
+    for (let i = 0; i < samples.length; i++) samples[i] = view.getInt16(i * 2, true)
+    const buffer = context.createBuffer(1, samples.length, 24000)
+    const channel = buffer.getChannelData(0)
+    for (let i = 0; i < samples.length; i++) channel[i] = samples[i] / 32768
+    const source = context.createBufferSource()
+    source.buffer = buffer
+    source.connect(context.destination)
+    source.onended = () => { this.sources.delete(source); this.completeIfPlayed() }
+    this.sources.add(source)
+    if (!this.playbackStarted) {
+      this.playbackStarted = true
+      this.events.onPlaybackStart()
+      this.events.onStatus('speaking')
+    }
+    const at = Math.max(context.currentTime + 0.04, this.nextTime)
+    source.start(at)
+    this.nextTime = at + buffer.duration
+  }
+
+  private completeIfPlayed() {
+    if (!this.active || !this.finishedGenerating || this.sources.size) return
+    this.active = false
+    this.playbackStarted = false
+    this.nextTime = 0
+    this.events.onPlaybackEnd()
+    this.events.onSpeaking(false)
+    this.events.onStatus('ready')
+    const finished = this.onFinished
+    this.onFinished = null
+    finished?.()
   }
 
   stop() {
     this.pending = null
-    this.pendingFinished = null
     this.onFinished = null
-    if (this.channel?.readyState === 'open' && this.active) {
-      if (this.generating) this.channel.send(JSON.stringify({ type: 'response.cancel' }))
-      this.channel.send(JSON.stringify({ type: 'output_audio_buffer.clear' }))
+    if (this.active && !this.finishedGenerating && this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify({ type: 'stop' }))
     }
     this.active = false
-    this.generating = false
-    this.responseId = null
-    this.audio?.pause()
+    this.finishedGenerating = false
+    this.playbackStarted = false
+    this.nextTime = 0
+    for (const source of this.sources) { source.onended = null; try { source.stop() } catch { /* Ya finalizado */ } }
+    this.sources.clear()
     this.events.onSpeaking(false)
   }
 
-  resumeAudio() {
-    if (this.audio?.srcObject) void this.audio.play().then(() => {
-      this.blocked = false
-      const text = this.lastText
-      const onFinished = this.onFinished ?? this.pendingFinished ?? undefined
-      this.stop()
-      if (text) this.speak(text, onFinished)
-    }).catch(() => { this.blocked = true; this.events.onStatus('blocked') })
-  }
+  resumeAudio() { if (this.context) void this.context.resume().catch(() => this.events.onStatus('blocked')) }
 
   private fail() {
     if (this.closed) return
@@ -182,13 +157,10 @@ export class RealtimeVoice {
   close() {
     if (this.closed) return
     this.closed = true
-    this.abort.abort()
     this.stop()
-    this.channel?.close()
-    this.pc?.close()
-    if (this.audio) this.audio.srcObject = null
-    this.channel = null
-    this.pc = null
-    this.audio = null
+    this.socket?.close()
+    this.socket = null
+    if (this.context) void this.context.close()
+    this.context = null
   }
 }

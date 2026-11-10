@@ -8,11 +8,13 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Identity,
     Index,
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -34,6 +36,7 @@ class Candidate(Base):
     password_hash: Mapped[str | None] = mapped_column(String(255))
     password_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resumes: Mapped[list["Resume"]] = relationship(back_populates="candidate")
     vacancies: Mapped[list["Vacancy"]] = relationship(back_populates="candidate")
@@ -64,6 +67,7 @@ class Resume(Base):
         Index("uq_resumes_primary_candidate", "candidate_id", unique=True,
               postgresql_where=text("is_primary"), sqlite_where=text("is_primary")),
         Index("ix_resumes_candidate_active_recent", "candidate_id", "active", "uploaded_at", "id"),
+        UniqueConstraint("id", "candidate_id", name="uq_resumes_id_candidate"),
     )
 
     id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
@@ -79,8 +83,10 @@ class Resume(Base):
 
 class Vacancy(Base):
     __tablename__ = "vacancies"
-    __table_args__ = (Index("ix_vacancies_candidate_active_recent", "candidate_id", "active",
-                            "created_at", "id"),)
+    __table_args__ = (
+        Index("ix_vacancies_candidate_active_recent", "candidate_id", "active", "created_at", "id"),
+        UniqueConstraint("id", "candidate_id", name="uq_vacancies_id_candidate"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
     candidate_id: Mapped[int | None] = mapped_column(ForeignKey("candidates.id", ondelete="CASCADE"))
@@ -121,6 +127,12 @@ class Competency(Base):
 
 class Comparison(Base):
     __tablename__ = "comparisons"
+    __table_args__ = (
+        ForeignKeyConstraint(["resume_id", "candidate_id"], ["resumes.id", "resumes.candidate_id"],
+                             name="fk_comparisons_owned_resume", ondelete="CASCADE"),
+        ForeignKeyConstraint(["vacancy_id", "candidate_id"], ["vacancies.id", "vacancies.candidate_id"],
+                             name="fk_comparisons_owned_vacancy", ondelete="CASCADE"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, Identity(), primary_key=True)
     candidate_id: Mapped[int] = mapped_column(ForeignKey("candidates.id", ondelete="CASCADE"))

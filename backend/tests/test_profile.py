@@ -1,4 +1,5 @@
 import io
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,30 @@ def pdf():
     writer.add_blank_page(width=200, height=200)
     writer.write(stream)
     return stream.getvalue()
+
+
+def test_resume_quota_ignores_hidden_and_exempts_admin(client):
+    http, engine = client
+    register(http, "cupos@example.com")
+
+    def upload(number):
+        return http.post(f"{API}/resumes", files={"file": (f"cv-{number}.pdf", pdf(), "application/pdf")})
+
+    with Session(engine) as db:
+        assert db.scalar(select(Candidate).where(Candidate.email == "cupos@example.com")).admin is False
+    saved = [upload(number) for number in range(5)]
+    assert all(response.status_code == 201 for response in saved)
+    blocked = upload(5)
+    assert blocked.status_code == 409
+    assert "5 CV activos" in blocked.json()["detail"]
+    assert http.patch(f"{API}/resumes/{saved[0].json()['id']}/hide").status_code == 204
+    assert upload(6).status_code == 201
+    with Session(engine) as db:
+        owner = db.scalar(select(Candidate).where(Candidate.email == "cupos@example.com"))
+        owner.admin = True
+        db.commit()
+    assert upload(7).status_code == 201
+    assert upload(8).status_code == 201
 
 
 def test_profile_documents_and_ownership(client):
@@ -138,3 +163,21 @@ def test_file_validation_and_avatar(client):
     assert http.get(saved.json()["avatar_url"]).status_code == 404
     assert http.post(f"{API}/resumes", files={"file": ("a.pdf", pdf(), "application/pdf")},
                      headers={"Origin": "https://otro.example"}).status_code == 403
+
+
+def test_resume_pagination_keeps_primary_first(client):
+    http, engine = client
+    register(http, "ana@example.com")
+    with Session(engine) as db:
+        candidate = db.scalar(select(Candidate).where(Candidate.email == "ana@example.com"))
+        db.add_all([Resume(candidate_id=candidate.id, filename=f"cv-{i}.pdf",
+                           storage_key=f"files/cv-{i}.pdf", is_primary=i == 0,
+                           uploaded_at=datetime.now(UTC) - timedelta(minutes=i))
+                    for i in range(23)])
+        db.commit()
+    first = http.get(f"{API}/resumes").json()
+    assert len(first) == 20
+    assert first[0]["is_primary"] is True
+    second = http.get(f"{API}/resumes?before={first[-1]['id']}").json()
+    assert len(second) == 3
+    assert {row["id"] for row in first}.isdisjoint(row["id"] for row in second)

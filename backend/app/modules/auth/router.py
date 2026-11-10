@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.rate_limit import SlidingWindow
+from app.core.rate_limit import SlidingWindow, shared_window
 from app.db.models import Candidate, CandidateSession, GoogleIdentity
 from app.db.session import SessionLocal
 
@@ -28,7 +28,7 @@ hasher = PasswordHasher()
 COOKIE = "candidate_session"
 SESSION_LIFETIME = timedelta(days=7)
 PASSWORD_LIFETIME = timedelta(days=200)
-_auth_limit = SlidingWindow()
+_auth_limit = shared_window() or SlidingWindow()
 
 
 def limit_auth(request: Request, action: str, email: str | None = None) -> None:

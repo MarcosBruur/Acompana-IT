@@ -1,13 +1,15 @@
 import type { Candidate } from './auth'
 import { API_BASE_URL, apiRequest } from './api'
 
+export const PAGE_SIZE = 20
+
 export type Resume = { id: number; filename: string; uploaded_at: string; is_primary: boolean }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return apiRequest<T>(`/profile${path}`, options, 'No se pudo completar la solicitud.')
 }
 
-export const listResumes = () => request<Resume[]>('/resumes')
+export const listResumes = (before?: number) => request<Resume[]>(`/resumes?limit=${PAGE_SIZE}${before ? `&before=${before}` : ''}`)
 export const selectPrimary = (id: number) => request<Resume>(`/resumes/${id}/primary`, { method: 'PATCH' })
 export const hideResume = (id: number) => request<void>(`/resumes/${id}/hide`, { method: 'PATCH' })
 export const resumeDownloadUrl = (id: number) => `${API_BASE_URL}/profile/resumes/${id}/download`

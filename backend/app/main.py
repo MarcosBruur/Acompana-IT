@@ -4,8 +4,15 @@ from fastapi.responses import JSONResponse
 
 from app.api.router import router
 from app.core.config import settings
+from app.core.rate_limit import RateLimitUnavailable
 
 app = FastAPI(title="Acompañamiento IT", version="0.1.0")
+
+
+@app.exception_handler(RateLimitUnavailable)
+async def rate_limit_unavailable(_request: Request, _error: RateLimitUnavailable):
+    return JSONResponse({"detail": "El control de solicitudes no está disponible. Intentá más tarde."},
+                        status_code=503)
 
 
 @app.middleware("http")

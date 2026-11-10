@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta
+
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.dialects.postgresql import JSONB
@@ -85,6 +87,40 @@ def test_interview_history_details_and_hide(tmp_path):
                 assert db.get(Interview, finished_id).active is False
                 assert db.scalar(select(InterviewResponse).where(
                     InterviewResponse.interview_id == finished_id)) is not None
+    finally:
+        app.dependency_overrides.clear()
+        engine.dispose()
+
+
+def test_interview_history_keyset_pagination(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'interviews-page.db'}")
+    Base.metadata.create_all(engine, tables=[Candidate.__table__, CandidateSession.__table__,
+                                             Vacancy.__table__, Interview.__table__])
+
+    def session():
+        with Session(engine) as db:
+            yield db
+
+    app.dependency_overrides[db_session] = session
+    try:
+        with TestClient(app, base_url="http://localhost:8000",
+                        headers={"Origin": "http://localhost:5173"}) as client:
+            assert register(client, "ana@example.com").status_code == 201
+            with Session(engine) as db:
+                candidate = db.scalar(select(Candidate))
+                vacancy = Vacancy(candidate_id=candidate.id, title="Python", description="Oferta")
+                db.add(vacancy)
+                db.flush()
+                db.add_all([Interview(candidate_id=candidate.id, vacancy_id=vacancy.id,
+                                      status="completed", score=60,
+                                      created_at=datetime.now(UTC) - timedelta(minutes=i))
+                            for i in range(22)])
+                db.commit()
+            first = client.get(API).json()
+            assert len(first) == 20
+            second = client.get(f"{API}?before={first[-1]['id']}").json()
+            assert len(second) == 2
+            assert {item["id"] for item in first}.isdisjoint(item["id"] for item in second)
     finally:
         app.dependency_overrides.clear()
         engine.dispose()

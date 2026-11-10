@@ -7,14 +7,15 @@ from datetime import UTC, datetime
 from time import monotonic
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from openai import AuthenticationError, RateLimitError
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from app.core.config import settings
 from app.core.llm import invalid_request_detail
-from app.core.rate_limit import prune_buckets
+from app.core.quotas import check_vacancy_quota
+from app.core.rate_limit import prune_buckets, shared_window
 from app.db.models import Candidate, CandidateSession, Vacancy, VacancyAnalysis
 from app.modules.auth.router import COOKIE, Database, expired, token_digest
 from app.modules.vacancies.analysis import Finding, analyze_offer
@@ -26,6 +27,7 @@ _requests: dict[str, deque[float]] = defaultdict(deque)
 _rate_lock = asyncio.Lock()
 _capacity = asyncio.Semaphore(3)
 _last_cleanup = 0.0
+_shared_limit = shared_window()
 
 
 class VacancyInput(BaseModel):
@@ -92,6 +94,10 @@ OptionalCandidate = Annotated[Candidate | None, Depends(optional_candidate)]
 
 async def check_limit(key: str, limit: int) -> None:
     global _last_cleanup
+    if _shared_limit is not None:
+        if not _shared_limit.check(f"vacancy:{key}", limit):
+            raise HTTPException(429, "Alcanzaste el límite de análisis por hora. Intentá más tarde.")
+        return
     async with _rate_lock:
         now = monotonic()
         if now - _last_cleanup >= 60:
@@ -108,6 +114,9 @@ async def check_limit(key: str, limit: int) -> None:
 
 
 async def refund_limit(key: str) -> None:
+    if _shared_limit is not None:
+        _shared_limit.refund(f"vacancy:{key}")
+        return
     async with _rate_lock:
         times = _requests.get(key)
         if times:
@@ -146,6 +155,8 @@ async def analyze(data: VacancyInput, request: Request, db: Database, candidate:
         raise HTTPException(503, "El análisis con IA aún no está configurado. Configurá OPENAI_API_KEY.")
     key = f"user:{candidate.id}" if candidate else f"ip:{request.client.host if request.client else 'unknown'}"
     candidate_id = candidate.id if candidate else None
+    if candidate:
+        check_vacancy_quota(db, candidate)
     await check_limit(key, 30 if candidate else 10)
     if _capacity.locked():
         await refund_limit(key)
@@ -197,9 +208,12 @@ async def analyze(data: VacancyInput, request: Request, db: Database, candidate:
         inconsistencies=inconsistencies, risk_signals=signals, risk_percentage=percentage,
     )
     if candidate_id is not None:
-        if not db.scalar(select(Candidate.id).where(Candidate.id == candidate_id,
-                                                    Candidate.active.is_(True))):
+        owner = db.scalar(select(Candidate).where(Candidate.id == candidate_id,
+                                                  Candidate.active.is_(True))
+                          .with_for_update().execution_options(populate_existing=True))
+        if owner is None:
             raise HTTPException(401, "Iniciá sesión para guardar el análisis.")
+        check_vacancy_quota(db, owner)
         vacancy = Vacancy(candidate_id=candidate_id, title=data.title,
                           company=data.company, description=data.description)
         db.add(vacancy)
@@ -221,16 +235,27 @@ async def analyze(data: VacancyInput, request: Request, db: Database, candidate:
 
 
 @router.get("", response_model=list[VacancySummary])
-def history(candidate: OptionalCandidate, db: Database):
+def history(candidate: OptionalCandidate, db: Database,
+            limit: int = Query(default=20, ge=1, le=100),
+            before: int | None = Query(default=None, gt=0)):
     if not candidate:
         raise HTTPException(401, "Iniciá sesión para consultar tus análisis.")
-    rows = db.scalars(select(Vacancy).where(Vacancy.candidate_id == candidate.id,
-                                           Vacancy.active.is_(True))
-                       .order_by(Vacancy.created_at.desc(), Vacancy.id.desc())).all()
+    query = (select(Vacancy, VacancyAnalysis.risk_percentage)
+             .outerjoin(VacancyAnalysis, VacancyAnalysis.vacancy_id == Vacancy.id)
+             .where(Vacancy.candidate_id == candidate.id, Vacancy.active.is_(True)))
+    if before is not None:
+        anchor = db.scalar(select(Vacancy).where(Vacancy.id == before,
+                                                 Vacancy.candidate_id == candidate.id))
+        if anchor is None:
+            raise HTTPException(404, "Vacante no encontrada.")
+        query = query.where(or_(Vacancy.created_at < anchor.created_at,
+                                and_(Vacancy.created_at == anchor.created_at,
+                                     Vacancy.id < anchor.id)))
+    rows = db.execute(query.order_by(Vacancy.created_at.desc(), Vacancy.id.desc())
+                      .limit(limit)).all()
     return [VacancySummary(id=row.id, title=row.title, company=row.company,
-                           created_at=row.created_at,
-                           risk_percentage=row.analysis.risk_percentage if row.analysis else None)
-            for row in rows]
+                           created_at=row.created_at, risk_percentage=risk)
+            for row, risk in rows]
 
 
 @router.get("/{vacancy_id}", response_model=VacancyResult)

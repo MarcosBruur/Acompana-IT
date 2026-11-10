@@ -2,27 +2,34 @@
 
 import asyncio
 import hashlib
-import io
+import json
 import logging
 from collections import defaultdict, deque
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from time import monotonic
 
-import httpx
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from openai import AuthenticationError, RateLimitError
 from pydantic import BaseModel, Field
-from pypdf import PdfReader
-from pypdf.errors import PdfReadError
-from sqlalchemy import func, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from starlette.concurrency import run_in_threadpool
+from websockets.asyncio.client import connect as realtime_connect
+from websockets.exceptions import ConnectionClosed
 
 from app.core.config import settings
 from app.core.llm import invalid_request_detail
-from app.core.rate_limit import prune_buckets
-from app.db.models import Candidate, Interview, InterviewResponse, Resume, Vacancy
-from app.modules.auth.router import ActiveCandidate, Database
+from app.core.pdf_processing import InvalidPdf, process_pdf
+from app.core.quotas import check_interview_quota
+from app.core.rate_limit import RateLimitUnavailable, prune_buckets, shared_window
+from app.db.models import Candidate, CandidateSession, Interview, InterviewResponse, Resume, Vacancy
+from app.modules.auth.router import (
+    COOKIE,
+    ActiveCandidate,
+    Database,
+    expired,
+    token_digest,
+)
 from app.modules.interviews.simulation import (
     contains_literal_code,
     evaluate_answer,
@@ -34,12 +41,22 @@ from app.modules.profile.router import stored_file
 router = APIRouter(prefix="/interviews", tags=["entrevistas"])
 logger = logging.getLogger(__name__)
 _capacity = asyncio.Semaphore(3)
-_attempts: dict[int, deque[float]] = defaultdict(deque)
-_attempt_lock = asyncio.Lock()
 _voice_attempts: dict[int, deque[float]] = defaultdict(deque)
 _voice_lock = asyncio.Lock()
-_attempt_cleanup = 0.0
 _voice_cleanup = 0.0
+_shared_limit = shared_window()
+
+
+async def refund_voice_attempt(candidate_id: int) -> None:
+    if _shared_limit is not None:
+        _shared_limit.refund(f"interview:voice:{candidate_id}")
+        return
+    async with _voice_lock:
+        times = _voice_attempts.get(candidate_id)
+        if times:
+            times.pop()
+            if not times:
+                del _voice_attempts[candidate_id]
 
 
 class InterviewSummary(BaseModel):
@@ -101,16 +118,13 @@ class AnswerInput(BaseModel):
     answer: str = Field(min_length=1, max_length=2000)
 
 
-class VoiceToken(BaseModel):
-    value: str
-
-
 def voice_session_config() -> dict:
     return {"session": {
         "type": "realtime", "model": settings.openai_voice_model,
         "output_modalities": ["audio"], "max_output_tokens": 2000,
         "audio": {"input": {"turn_detection": None},
-                  "output": {"voice": settings.openai_voice}},
+                  "output": {"voice": settings.openai_voice,
+                             "format": {"type": "audio/pcm", "rate": 24000}}},
         "instructions": (
             "Leé en español rioplatense de Argentina, con acento argentino natural y sutil, "
             "sin exagerarlo ni cambiar de idioma. Usá entonación cálida, ritmo conversacional "
@@ -155,11 +169,9 @@ def ongoing(interview_id: int, candidate_id: int, db: Database, *, lock: bool = 
 def resume_text(resume: Resume) -> str:
     try:
         with stored_file(resume.storage_key, "files").open("rb") as document:
-            reader = PdfReader(io.BytesIO(document.read()), strict=True)
-            text = " ".join((page.extract_text() or "") for page in reader.pages[:12])
-    except (OSError, ValueError, KeyError, PdfReadError) as exc:
+            text = process_pdf(document.read(5 * 1024 * 1024 + 1), extract=True)
+    except (OSError, InvalidPdf) as exc:
         raise HTTPException(422, "No se pudo leer el CV principal. Probá con otro PDF.") from exc
-    text = " ".join(text.split())[:5000]
     if len(text) < 40:
         raise HTTPException(422, "El CV principal no tiene texto extraíble. Subí un PDF con texto seleccionable o iniciá sin CV.")
     return text
@@ -186,7 +198,6 @@ def active_interview(candidate: ActiveCandidate, db: Database):
 
 @router.post("", response_model=InterviewSession, status_code=201)
 async def start(data: StartInput, candidate: ActiveCandidate, db: Database):
-    global _attempt_cleanup
     candidate_id = candidate.id
     if not settings.openai_api_key:
         raise HTTPException(503, "La simulación con IA aún no está configurada. Configurá OPENAI_API_KEY.")
@@ -199,6 +210,7 @@ async def start(data: StartInput, candidate: ActiveCandidate, db: Database):
         Interview.candidate_id == candidate_id, Interview.status == "in_progress"))
     if existing is not None:
         raise HTTPException(409, "Ya tenés una entrevista en curso. Retomala o cancelala antes de iniciar otra.")
+    check_interview_quota(db, candidate)
     resume = None
     text = ""
     if data.use_resume:
@@ -207,27 +219,7 @@ async def start(data: StartInput, candidate: ActiveCandidate, db: Database):
             Resume.active.is_(True)))
         if resume is None:
             raise HTTPException(422, "Establecé un CV principal activo en tu perfil o iniciá sin CV.")
-    recent = db.scalar(select(func.count(Interview.id)).where(
-        Interview.candidate_id == candidate_id,
-        Interview.created_at >= datetime.now(UTC) - timedelta(hours=1)))
-    if recent and recent >= 10:
-        raise HTTPException(429, "Alcanzaste el límite de entrevistas por hora. Intentá más tarde.")
-    async with _attempt_lock:
-        now = monotonic()
-        if now - _attempt_cleanup >= 60:
-            prune_buckets(_attempts, now)
-            _attempt_cleanup = now
-        if candidate_id not in _attempts and len(_attempts) >= 30000:
-            raise HTTPException(429, "El servicio está ocupado. Intentá más tarde.")
-        times = _attempts[candidate_id]
-        while times and times[0] <= now - 3600:
-            times.popleft()
-        if len(times) >= 10:
-            raise HTTPException(429, "Alcanzaste el límite de intentos por hora. Intentá más tarde.")
-        times.append(now)
     if _capacity.locked():
-        async with _attempt_lock:
-            _attempts[candidate_id].pop()
         raise HTTPException(429, "El servicio está ocupado. Intentá en unos momentos.")
     title, description = vacancy.title, vacancy.description
     resume_id = resume.id if resume else None
@@ -235,24 +227,19 @@ async def start(data: StartInput, candidate: ActiveCandidate, db: Database):
         db.expunge(resume)
     db.rollback()
     if resume:
-        try:
-            text = await run_in_threadpool(resume_text, resume)
-        except Exception:
-            async with _attempt_lock:
-                _attempts[candidate_id].pop()
-            raise
+        text = await run_in_threadpool(resume_text, resume)
     await _capacity.acquire()
     try:
         try:
             generated = await generate_questions(title, description, text, data.mode)
         except Exception as exc:  # noqa: BLE001 — no exponer respuestas o contenido del proveedor.
-            async with _attempt_lock:
-                _attempts[candidate_id].pop()
             raise provider_error(exc) from None
     finally:
         _capacity.release()
-    if not db.scalar(select(Candidate).where(
-        Candidate.id == candidate_id, Candidate.active.is_(True)).with_for_update()):
+    owner = db.scalar(select(Candidate).where(
+        Candidate.id == candidate_id, Candidate.active.is_(True))
+        .with_for_update().execution_options(populate_existing=True))
+    if owner is None:
         raise HTTPException(401, "Iniciá sesión para continuar.")
     vacancy = db.scalar(select(Vacancy).where(
         Vacancy.id == data.vacancy_id, Vacancy.candidate_id == candidate_id,
@@ -266,6 +253,7 @@ async def start(data: StartInput, candidate: ActiveCandidate, db: Database):
     if db.scalar(select(Interview.id).where(
         Interview.candidate_id == candidate_id, Interview.status == "in_progress")):
         raise HTTPException(409, "Ya tenés una entrevista en curso. Retomala antes de iniciar otra.")
+    check_interview_quota(db, owner)
     interview = Interview(candidate_id=candidate_id, vacancy_id=vacancy.id,
                           resume_id=resume_id, mode=data.mode,
                           status="in_progress")
@@ -290,56 +278,194 @@ def session(interview_id: int, candidate: ActiveCandidate, db: Database):
     return as_session(ongoing(interview_id, candidate.id, db))
 
 
-@router.post("/{interview_id}/voice-token", response_model=VoiceToken)
-async def voice_token(interview_id: int, candidate: ActiveCandidate, db: Database,
-                      response: Response):
+def approved_voice_text(interview: Interview, keys: object) -> str:
+    """Solo usar preguntas/correcciones persistidas; nunca aceptar texto libre del cliente."""
+    if not isinstance(keys, list) or not 1 <= len(keys) <= 3:
+        raise ValueError("Fragmentos no válidos")
+    questions = {item.id: item for item in interview.responses}
+    by_position = {item.position: item for item in interview.responses}
+    parts: list[str] = []
+    for key in keys:
+        if not isinstance(key, str) or len(key) > 32 or "-" not in key:
+            raise ValueError("Fragmento no válido")
+        kind, _, raw_id = key.partition("-")
+        if not raw_id.isdecimal() or int(raw_id) not in questions:
+            raise ValueError("Pregunta no encontrada")
+        question = questions[int(raw_id)]
+        if kind == "q":
+            parts.append(question.question)
+        elif kind == "e" and question.verdict in {"parcial", "incorrecta"} and question.explanation:
+            if contains_literal_code(question.explanation):
+                raise ValueError("Corrección no apta para voz")
+            parts.append(question.explanation)
+        elif kind == "c" and question.position > 1:
+            previous = by_position.get(question.position - 1)
+            if previous is None or previous.verdict is None:
+                raise ValueError("Transición no disponible")
+            parts.append("Bien, sigamos con la siguiente pregunta." if previous.verdict == "correcta"
+                         else "Pasemos a la siguiente pregunta.")
+        elif kind == "end" and all(item.verdict is not None for item in interview.responses):
+            parts.append("Terminaste las preguntas. Finalizá para ver tus resultados.")
+        else:
+            raise ValueError("Fragmento no permitido")
+    text = " ".join(parts)
+    if not text or len(text) > 1400:
+        raise ValueError("Fragmentos demasiado largos")
+    return text
+
+
+@router.websocket("/{interview_id}/voice")
+async def voice_socket(interview_id: int, websocket: WebSocket, db: Database):
     global _voice_cleanup
-    interview = ongoing(interview_id, candidate.id, db)
-    if interview.mode != "conversation":
-        raise HTTPException(409, "La voz solo está disponible en entrevistas conversacionales.")
-    if not settings.openai_api_key:
-        raise HTTPException(503, "La voz con IA todavía no está configurada.")
+    token = websocket.cookies.get(COOKIE)
+    session = db.scalar(select(CandidateSession).where(
+        CandidateSession.token_hash == token_digest(token))) if token else None
+    if (websocket.headers.get("origin") != settings.frontend_origin or not session
+            or not session.candidate.active or expired(session.candidate)
+            or session.expires_at.replace(tzinfo=UTC) <= datetime.now(UTC)):
+        await websocket.close(code=1008)
+        return
+    interview = db.scalar(select(Interview).where(Interview.id == interview_id,
+                                                  Interview.candidate_id == session.candidate_id,
+                                                  Interview.status == "in_progress"))
+    if (not interview or interview.mode != "conversation" or not settings.openai_api_key):
+        await websocket.close(code=1008)
+        return
     if settings.openai_voice not in {"alloy", "ash", "ballad", "coral", "echo", "sage",
-                                    "shimmer", "verse", "marin", "cedar"}:
-        raise HTTPException(503, "Configurá una voz de OpenAI válida en OPENAI_VOICE.")
-    async with _voice_lock:
-        now = monotonic()
-        if now - _voice_cleanup >= 60:
-            prune_buckets(_voice_attempts, now)
-            _voice_cleanup = now
-        if candidate.id not in _voice_attempts and len(_voice_attempts) >= 30000:
-            raise HTTPException(429, "El servicio está ocupado. Probá más tarde.")
-        attempts = _voice_attempts[candidate.id]
-        while attempts and attempts[0] <= now - 3600:
-            attempts.popleft()
-        if len(attempts) >= 8:
-            raise HTTPException(429, "Alcanzaste el límite de conexiones de voz. Probá más tarde.")
-        attempts.append(now)
-    candidate_id = candidate.id
-    db.rollback()
-    try:
-        async with httpx.AsyncClient(timeout=12) as client:
-            token_response = await client.post(
-                "https://api.openai.com/v1/realtime/client_secrets",
-                headers={
-                    "Authorization": f"Bearer {settings.openai_api_key}",
-                    "OpenAI-Safety-Identifier": hashlib.sha256(
-                        f"candidate:{candidate_id}".encode()).hexdigest(),
-                },
-                json=voice_session_config(),
-            )
-            token_response.raise_for_status()
-            token = token_response.json()["value"]
-            if not isinstance(token, str) or not token:
-                raise ValueError("Token efímero inválido.")
-    except (httpx.HTTPError, KeyError, ValueError) as exc:
+                                     "shimmer", "verse", "marin", "cedar"}:
+        await websocket.close(code=1011)
+        return
+    candidate_id = session.candidate_id
+    if _shared_limit is not None:
+        try:
+            allowed = _shared_limit.check(f"interview:voice:{candidate_id}", 8)
+        except RateLimitUnavailable:
+            await websocket.close(code=1013)
+            return
+        if not allowed:
+            await websocket.close(code=1008)
+            return
+    else:
         async with _voice_lock:
-            _voice_attempts[candidate_id].pop()
-        logger.warning("No se pudo iniciar voz Realtime: tipo=%s estado=%s",
-                       type(exc).__name__, getattr(getattr(exc, "response", None), "status_code", None))
-        raise HTTPException(503, "La voz con IA no está disponible. Podés continuar por escrito.") from None
-    response.headers["Cache-Control"] = "no-store"
-    return VoiceToken(value=token)
+            now = monotonic()
+            if now - _voice_cleanup >= 60:
+                prune_buckets(_voice_attempts, now)
+                _voice_cleanup = now
+            if candidate_id not in _voice_attempts and len(_voice_attempts) >= 30000:
+                await websocket.close(code=1008)
+                return
+            attempts = _voice_attempts[candidate_id]
+            while attempts and attempts[0] <= now - 3600:
+                attempts.popleft()
+            if len(attempts) >= 8:
+                await websocket.close(code=1008)
+                return
+            attempts.append(now)
+    db.rollback()
+    await websocket.accept()
+    try:
+        async with realtime_connect(
+            f"wss://api.openai.com/v1/realtime?model={settings.openai_voice_model}",
+            additional_headers={
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "OpenAI-Safety-Identifier": hashlib.sha256(
+                    f"candidate:{candidate_id}".encode()).hexdigest(),
+            }, open_timeout=12, max_size=256 * 1024,
+        ) as provider:
+            await provider.send(json.dumps({"type": "session.update",
+                                            "session": voice_session_config()["session"]}))
+            await websocket.send_json({"type": "ready"})
+
+            async def receive_client():
+                nonlocal active_turn
+                turns = 0
+                while True:
+                    raw = await websocket.receive_text()
+                    if len(raw) > 256:
+                        raise ValueError("Evento demasiado largo")
+                    event = json.loads(raw)
+                    if event.get("type") == "stop":
+                        if active_turn:
+                            await provider.send(json.dumps({"type": "response.cancel"}))
+                            active_turn = False
+                        continue
+                    if event.get("type") != "speak" or turns >= 45:
+                        raise ValueError("Evento no permitido")
+                    await asyncio.wait_for(turn_done.wait(), timeout=8)
+                    current_session = db.scalar(select(CandidateSession).where(
+                        CandidateSession.token_hash == token_digest(token)))
+                    current = db.scalar(select(Interview).where(
+                        Interview.id == interview_id, Interview.candidate_id == candidate_id,
+                        Interview.status == "in_progress"))
+                    if (not current_session or not current_session.candidate.active
+                            or current_session.expires_at.replace(tzinfo=UTC) <= datetime.now(UTC)
+                            or not current or expired(current_session.candidate)):
+                        raise ValueError("Sesión vencida")
+                    text = approved_voice_text(current, event.get("keys"))
+                    db.rollback()
+                    turns += 1
+                    active_turn = True
+                    turn_done.clear()
+                    await provider.send(json.dumps({
+                        "type": "response.create", "response": {
+                            "conversation": "none", "output_modalities": ["audio"],
+                            "max_output_tokens": 2000,
+                            "instructions": "Leé literalmente en español rioplatense de Argentina, sin agregar comentarios ni cambiar la corrección.",
+                            "input": [{"type": "message", "role": "user", "content": [
+                                {"type": "input_text", "text": text}]}],
+                        },
+                    }))
+
+            async def receive_provider():
+                nonlocal active_turn
+                async for raw in provider:
+                    event = json.loads(raw)
+                    kind = event.get("type")
+                    if kind == "response.output_audio.delta" and isinstance(event.get("delta"), str):
+                        await websocket.send_json({"type": "audio", "delta": event["delta"]})
+                    elif kind == "response.output_audio_transcript.delta":
+                        await websocket.send_json({"type": "transcript", "delta": event.get("delta", "")})
+                    elif kind == "response.done":
+                        active_turn = False
+                        turn_done.set()
+                        if event.get("response", {}).get("status") == "cancelled":
+                            continue
+                        await websocket.send_json({"type": "done",
+                                                   "failed": event.get("response", {}).get("status") == "failed"})
+                    elif kind == "error":
+                        await websocket.send_json({"type": "error"})
+                        break
+
+            active_turn = False
+            turn_done = asyncio.Event()
+            turn_done.set()
+            async with asyncio.timeout(1800):
+                tasks = [asyncio.create_task(receive_client()), asyncio.create_task(receive_provider())]
+                try:
+                    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        await task
+                finally:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+    except (WebSocketDisconnect, ConnectionClosed, TimeoutError, ValueError):
+        pass
+    except Exception as exc:  # noqa: BLE001 — no filtrar información del proveedor.
+        logger.warning("Falló la voz Realtime: tipo=%s", type(exc).__name__)
+        try:
+            await refund_voice_attempt(candidate_id)
+        except RateLimitUnavailable:
+            pass
+        try:
+            await websocket.send_json({"type": "error"})
+        except RuntimeError:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except RuntimeError:
+            pass
 
 
 @router.put("/{interview_id}/questions/{question_id}", response_model=InterviewSession)
@@ -454,14 +580,24 @@ def cancel(interview_id: int, candidate: ActiveCandidate, db: Database):
 
 
 @router.get("", response_model=list[InterviewSummary])
-def history(candidate: ActiveCandidate, db: Database):
+def history(candidate: ActiveCandidate, db: Database,
+            limit: int = Query(default=20, ge=1, le=100),
+            before: int | None = Query(default=None, gt=0)):
+    query = (select(Interview, Vacancy.title)
+             .join(Vacancy, Interview.vacancy_id == Vacancy.id)
+             .where(Interview.candidate_id == candidate.id,
+                    Interview.active.is_(True), Interview.status == "completed",
+                    Interview.score.is_not(None)))
+    if before is not None:
+        anchor = db.scalar(select(Interview).where(Interview.id == before,
+                                                    Interview.candidate_id == candidate.id))
+        if anchor is None:
+            raise HTTPException(404, "Entrevista no encontrada.")
+        query = query.where(or_(Interview.created_at < anchor.created_at,
+                                and_(Interview.created_at == anchor.created_at,
+                                     Interview.id < anchor.id)))
     rows = db.execute(
-        select(Interview, Vacancy.title)
-        .join(Vacancy, Interview.vacancy_id == Vacancy.id)
-        .where(Interview.candidate_id == candidate.id,
-               Interview.active.is_(True), Interview.status == "completed",
-               Interview.score.is_not(None))
-        .order_by(Interview.created_at.desc(), Interview.id.desc())
+        query.order_by(Interview.created_at.desc(), Interview.id.desc()).limit(limit)
     ).all()
     return [InterviewSummary(id=interview.id, vacancy_title=title,
                              created_at=interview.created_at, score=interview.score)

@@ -1,5 +1,7 @@
 import { apiRequest } from './api'
 
+export const PAGE_SIZE = 20
+
 export type Finding = {
   title: string
   explanation: string
@@ -40,5 +42,5 @@ export function analyzeVacancy(data: { title: string; company: string | null; de
   })
 }
 export const getVacancy = (id: number) => request<VacancyResult>(`/${id}`)
-export const getVacancies = () => request<VacancySummary[]>('')
+export const getVacancies = (before?: number) => request<VacancySummary[]>(`?limit=${PAGE_SIZE}${before ? `&before=${before}` : ''}`)
 export const hideVacancy = (id: number) => request<void>(`/${id}/hide`, { method: 'PATCH' })

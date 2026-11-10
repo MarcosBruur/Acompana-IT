@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react'
 import { useAuth } from '../features/auth-context'
+import { useGuestAccessLink } from '../features/guest-access'
 import { Link } from 'react-router-dom'
 
 export type DesignScreen =
@@ -36,10 +37,11 @@ export function Header({
   screen: DesignScreen
 }) {
   const { candidate } = useAuth()
+  const onProfileClick = useGuestAccessLink('profile')
   return (
     <header className="page-header">
       <h1>{title}</h1>
-      <Link className="user-pill" to="/perfil" aria-label={`Ir a perfil de ${candidate?.nickname || candidate?.first_name || 'visitante'}`}>
+      <Link className="user-pill" to="/perfil" onClick={onProfileClick} aria-label={`Ir a perfil de ${candidate?.nickname || candidate?.first_name || 'visitante'}`}>
         {candidate?.avatar_url ? <img className="avatar-thumb" src={candidate.avatar_url} alt="" /> : <Asset screen={screen} name="imgAvatar" />}
         <span>{candidate?.nickname || candidate?.first_name || 'Visitante'}</span>
       </Link>
@@ -76,12 +78,5 @@ export function Modal({
         Volver
       </button>
     </dialog>
-  )
-}
-export function PreviewNotice() {
-  return (
-    <p className="preview-notice">
-      Algunas vistas aún contienen datos de ejemplo · Comparaciones pendientes de integración.
-    </p>
   )
 }

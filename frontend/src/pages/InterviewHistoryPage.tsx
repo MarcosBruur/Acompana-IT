@@ -4,7 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 import { Header, Modal } from '../components/Design'
 import { useAuth } from '../features/auth-context'
 import { useNotifications } from '../features/notifications-context'
-import { getInterview, getInterviews, hideInterview, type InterviewResult, type InterviewSummary } from '../services/interviews'
+import { getInterview, getInterviews, hideInterview, PAGE_SIZE, type InterviewResult, type InterviewSummary } from '../services/interviews'
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat('es-AR', { day: '2-digit', month: 'long', year: 'numeric' }).format(new Date(value))
@@ -13,22 +13,36 @@ function formatDate(value: string) {
 export function InterviewHistoryPage() {
   const { candidate } = useAuth()
   const notifications = useNotifications()
-  const [history, setHistory] = useState<{ ownerId: number; items: InterviewSummary[] } | null>(null)
+  const [history, setHistory] = useState<{ ownerId: number; items: InterviewSummary[]; hasMore: boolean } | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<InterviewSummary | null>(null)
   const [hiding, setHiding] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
 
   useEffect(() => {
     let active = true
     getInterviews()
-      .then((items) => { if (active && candidate) setHistory({ ownerId: candidate.id, items }) })
+      .then((items) => { if (active && candidate) setHistory({ ownerId: candidate.id, items, hasMore: items.length === PAGE_SIZE }) })
       .catch((reason: Error) => { if (active) setError(reason.message) })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
   }, [candidate])
 
   const items = history && history.ownerId === candidate?.id ? history.items : []
+
+  async function loadMore() {
+    if (!candidate || !history?.hasMore || loadingMore) return
+    setLoadingMore(true)
+    try {
+      const next = await getInterviews(items.at(-1)?.id)
+      setHistory((current) => current?.ownerId === candidate.id ? {
+        ...current, items: [...current.items, ...next.filter((item) => !current.items.some((old) => old.id === item.id))],
+        hasMore: next.length === PAGE_SIZE,
+      } : current)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'No se pudieron cargar más entrevistas.') }
+    finally { setLoadingMore(false) }
+  }
 
   async function confirmHide() {
     if (!selected || hiding) return
@@ -82,6 +96,7 @@ export function InterviewHistoryPage() {
             </div>
           </li>)}
         </ul>
+        {history?.hasMore && <button className="secondary" type="button" disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? 'Cargando…' : 'Ver más entrevistas'}</button>}
       </section>
     )}
     {error && history && !selected && <p className="field-error interview-history-error" role="alert">{error}</p>}

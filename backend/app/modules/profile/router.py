@@ -6,15 +6,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, field_validator
-from pypdf import PdfReader
-from pypdf.errors import PdfReadError
-from sqlalchemy import select, update
+from sqlalchemy import and_, false, or_, select, update
+from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
+from app.core.pdf_processing import InvalidPdf, process_pdf
+from app.core.quotas import check_resume_quota
 from app.db.models import Candidate, Resume
 from app.modules.auth.router import ActiveCandidate, CandidateOutput, Database, public_candidate
 
@@ -113,30 +114,46 @@ def get_avatar(candidate: ActiveCandidate):
 
 
 @router.get("/resumes", response_model=list[ResumeOutput])
-def list_resumes(candidate: ActiveCandidate, db: Database):
-    return db.scalars(select(Resume).where(Resume.candidate_id == candidate.id, Resume.active.is_(True))
-                       .order_by(Resume.uploaded_at.desc(), Resume.id.desc())).all()
+def list_resumes(candidate: ActiveCandidate, db: Database,
+                 limit: int = Query(default=20, ge=1, le=100),
+                 before: int | None = Query(default=None, gt=0)):
+    query = select(Resume).where(Resume.candidate_id == candidate.id, Resume.active.is_(True))
+    if before is not None:
+        anchor = db.scalar(select(Resume).where(Resume.id == before,
+                                               Resume.candidate_id == candidate.id))
+        if anchor is None:
+            raise HTTPException(404, "Currículum no encontrado.")
+        query = query.where(or_(Resume.is_primary.is_(False) if anchor.is_primary else false(),
+                                and_(Resume.is_primary == anchor.is_primary,
+                                     or_(Resume.uploaded_at < anchor.uploaded_at,
+                                         and_(Resume.uploaded_at == anchor.uploaded_at,
+                                              Resume.id < anchor.id)))))
+    return db.scalars(query.order_by(Resume.is_primary.desc(), Resume.uploaded_at.desc(),
+                                     Resume.id.desc()).limit(limit)).all()
 
 
 @router.post("/resumes", response_model=ResumeOutput, status_code=201)
 async def upload_resume(candidate: ActiveCandidate, db: Database, file: Annotated[UploadFile, File()]):
+    candidate_id = candidate.id
+    check_resume_quota(db, candidate)
+    db.rollback()
     filename = Path(file.filename or "").name
     if not filename.lower().endswith(".pdf") or len(filename) > 255 or file.content_type != "application/pdf":
         raise HTTPException(422, "Seleccioná un PDF de hasta 5 MB.")
     content = await read_limited(file)
-    if not content.startswith(b"%PDF-") or b"%%EOF" not in content[-1024:]:
-        raise HTTPException(422, "El archivo no es un PDF válido.")
     try:
-        reader = PdfReader(io.BytesIO(content), strict=True)
-        if not reader.pages:
-            raise HTTPException(422, "El PDF debe contener al menos una página.")
-    except (PdfReadError, ValueError, OSError, KeyError):
-        raise HTTPException(422, "El archivo no es un PDF válido.") from None
-    db.scalar(select(Candidate).where(Candidate.id == candidate.id).with_for_update())
-    has_primary = db.scalar(select(Resume.id).where(Resume.candidate_id == candidate.id,
-                                                    Resume.active.is_(True), Resume.is_primary))
+        await run_in_threadpool(process_pdf, content)
+    except InvalidPdf:
+        raise HTTPException(422, "El archivo PDF no es válido o tardó demasiado en procesarse.") from None
+    locked = db.scalar(select(Candidate).where(Candidate.id == candidate_id, Candidate.active.is_(True))
+                       .with_for_update().execution_options(populate_existing=True))
+    if locked is None:
+        raise HTTPException(401, "Iniciá sesión para continuar.")
+    check_resume_quota(db, locked)
+    has_primary = db.scalar(select(Resume.id).where(Resume.candidate_id == candidate_id,
+                                                     Resume.active.is_(True), Resume.is_primary))
     key, path = destination("files", "pdf")
-    resume = Resume(candidate_id=candidate.id, filename=filename, storage_key=key,
+    resume = Resume(candidate_id=candidate_id, filename=filename, storage_key=key,
                     is_primary=has_primary is None)
     try:
         path.write_bytes(content)

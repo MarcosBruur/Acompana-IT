@@ -1,5 +1,7 @@
 import { apiRequest } from './api'
 
+export const PAGE_SIZE = 20
+
 export type InterviewSummary = {
   id: number
   vacancy_title: string
@@ -44,7 +46,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return apiRequest<T>(`/interviews${path}`, options)
 }
 
-export const getInterviews = () => request<InterviewSummary[]>('')
+export const getInterviews = (before?: number) => request<InterviewSummary[]>(`?limit=${PAGE_SIZE}${before ? `&before=${before}` : ''}`)
 export const getInterview = (id: number) => request<InterviewResult>(`/${id}`)
 export const hideInterview = (id: number) => request<void>(`/${id}/hide`, { method: 'PATCH' })
 export const getActiveInterview = () => request<InterviewSession | null>('/active')
@@ -57,4 +59,3 @@ export const sendInterviewAnswer = (id: number, questionId: number, answer: stri
   request<InterviewSession>(`/${id}/questions/${questionId}/answer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answer }) })
 export const finishInterview = (id: number) => request<InterviewResult>(`/${id}/finish`, { method: 'POST' })
 export const cancelInterview = (id: number) => request<void>(`/${id}/cancel`, { method: 'POST' })
-export const getInterviewVoiceToken = (id: number) => request<{ value: string }>(`/${id}/voice-token`, { method: 'POST' })

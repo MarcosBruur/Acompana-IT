@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.models import Candidate, Interview, Vacancy
+from app.db.models import Candidate, Comparison, Interview, Resume, Vacancy
 
 
 @pytest.mark.skipif(not os.getenv("TEST_DATABASE_URL"), reason="Requiere PostgreSQL aislado")
@@ -35,6 +35,18 @@ def test_postgres_interview_constraints():
                 db.flush()
             assert db.scalar(select(Interview.id).where(
                 Interview.candidate_id == candidate.id)) is not None
+            other = Candidate(email="audit-other@example.test", first_name="Otro", last_name="Dueño")
+            db.add(other)
+            db.flush()
+            resume = Resume(candidate_id=candidate.id, filename="cv.pdf",
+                            storage_key="files/no-real.pdf")
+            foreign_vacancy = Vacancy(candidate_id=other.id, title="Otro", description="Otra oferta")
+            db.add_all([resume, foreign_vacancy])
+            db.flush()
+            with pytest.raises(IntegrityError), db.begin_nested():
+                db.add(Comparison(candidate_id=candidate.id, resume_id=resume.id,
+                                  vacancy_id=foreign_vacancy.id))
+                db.flush()
             db.rollback()
     finally:
         engine.dispose()

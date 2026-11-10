@@ -1,11 +1,11 @@
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 
-import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from httpx import MockTransport, Request, Response
+from httpx import Request, Response
 from langchain_core.runnables import RunnableLambda
 from openai import BadRequestError
 from pypdf import PdfWriter
@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
+from starlette.websockets import WebSocketDisconnect
 
 from app.db.base import Base
 from app.db.models import (
@@ -31,6 +32,12 @@ from app.modules.interviews import simulation
 from app.modules.interviews.simulation import Evaluation, Question, QuestionSet
 
 API = "/api/v1/interviews"
+
+
+def voice_headers(client):
+    # TestClient usa ws://testserver, distinto al host de la cookie HTTP de la sesión.
+    return {"Origin": "http://localhost:5173",
+            "Cookie": f"candidate_session={client.cookies['candidate_session']}"}
 
 
 @compiles(JSONB, "sqlite")
@@ -65,6 +72,103 @@ def questions(mode):
         correct_index=0 if mode == "multiple_choice" else None,
         reference_answer="Se resuelve con una función de Python y sus pruebas.",
     ) for i in range(12 if mode == "multiple_choice" else 10)])
+
+
+@pytest.fixture
+def quota_client(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'quotas.db'}")
+    Base.metadata.create_all(engine, tables=[
+        Candidate.__table__, CandidateSession.__table__, Resume.__table__, Vacancy.__table__,
+        VacancyAnalysis.__table__, Interview.__table__, InterviewResponse.__table__,
+    ])
+
+    def session():
+        with Session(engine) as db:
+            yield db
+
+    async def generate(_title, _description, _resume, mode):
+        return questions(mode)
+
+    monkeypatch.setattr(interview_router.settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(interview_router, "generate_questions", generate)
+    app.dependency_overrides[db_session] = session
+    with TestClient(app, base_url="http://localhost:8000",
+                    headers={"Origin": "http://localhost:5173"}) as client:
+        register(client, "cupos@example.com")
+        yield client, engine, create_vacancy(engine, "cupos@example.com")
+    app.dependency_overrides.clear()
+    engine.dispose()
+
+
+def test_visitor_cannot_start_interview(quota_client):
+    client, engine, vacancy_id = quota_client
+    client.cookies.clear()
+    payload = {"vacancy_id": vacancy_id, "mode": "multiple_choice"}
+
+    response = client.post(API, json=payload)
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Iniciá sesión para continuar."
+
+    client.cookies.set("candidate_session", "invalid-session")
+    assert client.post(API, json=payload).status_code == 401
+    with Session(engine) as db:
+        assert db.scalar(select(Interview.id)) is None
+
+
+def test_interview_daily_quota_counts_cancelled_and_hidden(quota_client):
+    client, engine, vacancy_id = quota_client
+    with Session(engine) as db:
+        owner = db.scalar(select(Candidate).where(Candidate.email == "cupos@example.com"))
+        db.add_all([Interview(candidate_id=owner.id, vacancy_id=vacancy_id,
+                              status="cancelled", active=False) for _ in range(10)])
+        db.commit()
+    payload = {"vacancy_id": vacancy_id, "mode": "multiple_choice"}
+    blocked = client.post(API, json=payload)
+    assert blocked.status_code == 429
+    assert "24 horas" in blocked.json()["detail"]
+    with Session(engine) as db:
+        oldest = db.scalar(select(Interview).order_by(Interview.id).limit(1))
+        oldest.created_at = datetime.now(UTC) - timedelta(hours=25)
+        db.commit()
+    started = client.post(API, json=payload)
+    assert started.status_code == 201
+    assert client.post(f"{API}/{started.json()['id']}/cancel").status_code == 204
+    with Session(engine) as db:
+        owner = db.scalar(select(Candidate).where(Candidate.email == "cupos@example.com"))
+        owner.admin = True
+        db.commit()
+    assert client.post(API, json=payload).status_code == 201
+
+
+def test_interview_saved_results_quota_and_hidden_result(quota_client):
+    client, engine, vacancy_id = quota_client
+    with Session(engine) as db:
+        owner = db.scalar(select(Candidate).where(Candidate.email == "cupos@example.com"))
+        db.add_all([Interview(candidate_id=owner.id, vacancy_id=vacancy_id,
+                              status="completed", score=70,
+                              created_at=datetime.now(UTC) - timedelta(days=2)) for _ in range(20)])
+        db.commit()
+        hidden_id = db.scalar(select(Interview.id).where(Interview.candidate_id == owner.id))
+    payload = {"vacancy_id": vacancy_id, "mode": "multiple_choice"}
+    blocked = client.post(API, json=payload)
+    assert blocked.status_code == 409
+    assert "20 resultados" in blocked.json()["detail"]
+    with Session(engine) as db:
+        owner = db.scalar(select(Candidate).where(Candidate.email == "cupos@example.com"))
+        owner.admin = True
+        db.commit()
+    unrestricted = client.post(API, json=payload)
+    assert unrestricted.status_code == 201
+    assert client.post(f"{API}/{unrestricted.json()['id']}/cancel").status_code == 204
+    with Session(engine) as db:
+        owner = db.scalar(select(Candidate).where(Candidate.email == "cupos@example.com"))
+        owner.admin = False
+        db.commit()
+    assert client.patch(f"{API}/{hidden_id}/hide").status_code == 204
+    started = client.post(API, json=payload)
+    assert started.status_code == 201
+    assert client.post(f"{API}/{started.json()['id']}/finish").status_code == 200
+    assert client.post(API, json=payload).status_code == 409
 
 
 def test_multiple_choice_private_questions_early_finish_and_hidden_vacancy(tmp_path, monkeypatch):
@@ -104,14 +208,16 @@ def test_multiple_choice_private_questions_early_finish_and_hidden_vacancy(tmp_p
                        for item in initial["questions"])
             question_id = initial["questions"][0]["id"]
             assert client.get(f"{API}/active").json()["id"] == interview_id
-            assert client.post(f"{API}/{interview_id}/voice-token").status_code == 409
+            assert client.post(f"{API}/{interview_id}/voice-token").status_code == 404
             assert client.put(f"{API}/{interview_id}/questions/{question_id}",
                               json={"selected_index": 0}).json()["questions"][0]["answer"] == "0"
             assert client.put(f"{API}/{interview_id}/questions/{question_id}",
                               json={"selected_index": 8}).status_code == 422
             register(client, "otra@example.com")
             assert client.get(f"{API}/{interview_id}/session").status_code == 404
-            assert client.post(f"{API}/{interview_id}/voice-token").status_code == 404
+            with pytest.raises(WebSocketDisconnect), client.websocket_connect(
+                f"{API}/{interview_id}/voice", headers=voice_headers(client)):
+                pass
             assert client.post(f"{API}/{interview_id}/finish").status_code == 404
             assert client.post(API, json={"vacancy_id": vacancy_id, "mode": "conversation"}).status_code == 404
             client.post("/api/v1/auth/login", json={"email": "ana@example.com", "password": "ClaveSegura1!"})
@@ -191,35 +297,52 @@ def test_conversation_correction_resume_and_cancel(tmp_path, monkeypatch):
             monkeypatch.setattr(interview_router, "generate_questions", generate)
             started = client.post(API, json={"vacancy_id": vacancy_id, "mode": "conversation"}).json()
             interview_id, first_id, second_id = started["id"], started["questions"][0]["id"], started["questions"][1]["id"]
-            requests = []
-            original_client = httpx.AsyncClient
+            sent = []
 
-            def token_request(request):
-                assert not sessions[-1].in_transaction()
-                requests.append(request)
-                assert request.url.path == "/v1/realtime/client_secrets"
-                payload = json.loads(request.content)
-                assert payload["session"]["model"] == "gpt-realtime-2.1-mini"
-                assert payload["session"]["audio"]["output"]["voice"] == "marin"
-                assert "CV privado" not in request.content.decode()
-                return Response(200, json={"value": "ephemeral-test"})
+            class FakeRealtime:
+                def __init__(self):
+                    self.queue = asyncio.Queue()
 
-            monkeypatch.setattr(interview_router.httpx, "AsyncClient", lambda **kwargs: original_client(
-                transport=MockTransport(token_request), **kwargs))
-            minted = client.post(f"{API}/{interview_id}/voice-token")
-            assert minted.status_code == 200 and minted.json() == {"value": "ephemeral-test"}
-            assert minted.headers["cache-control"] == "no-store"
-            assert len(requests) == 1
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    pass
+
+                async def send(self, payload):
+                    assert not sessions[-1].in_transaction()
+                    event = json.loads(payload)
+                    sent.append(event)
+                    if event["type"] == "response.create":
+                        await self.queue.put(json.dumps({"type": "response.output_audio.delta",
+                                                         "delta": "AAAAAA=="}))
+                        await self.queue.put(json.dumps({"type": "response.done",
+                                                         "response": {"status": "completed"}}))
+
+                async def __aiter__(self):
+                    while True:
+                        yield await self.queue.get()
+
+            monkeypatch.setattr(interview_router, "realtime_connect", lambda *_args, **_kwargs: FakeRealtime())
+            with client.websocket_connect(f"{API}/{interview_id}/voice",
+                                          headers=voice_headers(client)) as voice:
+                assert voice.receive_json()["type"] == "ready"
+                voice.send_json({"type": "speak", "keys": [f"q-{first_id}"],
+                                 "text": "Secreto arbitrario que no debe enviarse"})
+                assert voice.receive_json()["type"] == "audio"
+                assert voice.receive_json()["type"] == "done"
+            spoken = next(item for item in sent if item["type"] == "response.create")
+            assert spoken["response"]["input"][0]["content"][0]["text"] == started["questions"][0]["question"]
+            assert "Secreto arbitrario" not in json.dumps(sent)
+            with pytest.raises(WebSocketDisconnect), client.websocket_connect(
+                f"{API}/{interview_id}/voice",
+                headers={**voice_headers(client), "Origin": "https://origen-malicioso.example"}):
+                pass
             monkeypatch.setattr(interview_router.settings, "openai_voice", "voz-invalida")
-            assert client.post(f"{API}/{interview_id}/voice-token").status_code == 503
-            assert len(requests) == 1
+            with pytest.raises(WebSocketDisconnect), client.websocket_connect(
+                f"{API}/{interview_id}/voice", headers=voice_headers(client)):
+                pass
             monkeypatch.setattr(interview_router.settings, "openai_voice", "marin")
-            monkeypatch.setattr(interview_router.httpx, "AsyncClient", lambda **kwargs: original_client(
-                transport=MockTransport(lambda _request: Response(400, json={
-                    "error": {"message": "private-prompt-or-key"}})), **kwargs))
-            unavailable = client.post(f"{API}/{interview_id}/voice-token")
-            assert unavailable.status_code == 503
-            assert "private-prompt-or-key" not in unavailable.text
             assert client.post(f"{API}/{interview_id}/questions/{second_id}/answer",
                                json={"answer": "Cualquier cosa"}).status_code == 409
             reply = client.post(f"{API}/{interview_id}/questions/{first_id}/answer",
@@ -227,6 +350,17 @@ def test_conversation_correction_resume_and_cancel(tmp_path, monkeypatch):
             assert reply.status_code == 200
             assert reply.json()["questions"][0]["verdict"] == "incorrecta"
             assert "No es correcto" in reply.json()["questions"][0]["explanation"]
+            with client.websocket_connect(f"{API}/{interview_id}/voice",
+                                          headers=voice_headers(client)) as voice:
+                assert voice.receive_json()["type"] == "ready"
+                voice.send_json({"type": "speak", "keys": [f"e-{first_id}", f"c-{second_id}",
+                                                           f"q-{second_id}"]})
+                assert voice.receive_json()["type"] == "audio"
+                assert voice.receive_json()["type"] == "done"
+            spoken = [item for item in sent if item["type"] == "response.create"][-1]
+            assert spoken["response"]["input"][0]["content"][0]["text"] == (
+                reply.json()["questions"][0]["explanation"] + " Pasemos a la siguiente pregunta. "
+                + started["questions"][1]["question"])
             assert evaluation_contexts[0]["vacancy_title"] == "Python Jr"
             assert "Python, SQL" in evaluation_contexts[0]["vacancy_description"]
             assert evaluation_contexts[0]["topic"] == "Python"
@@ -239,7 +373,9 @@ def test_conversation_correction_resume_and_cancel(tmp_path, monkeypatch):
             assert "No sé." in evaluation_contexts[1]["previous"]
             assert "Python Jr" == evaluation_contexts[1]["vacancy_title"]
             assert client.post(f"{API}/{interview_id}/cancel").status_code == 204
-            assert client.post(f"{API}/{interview_id}/voice-token").status_code == 409
+            with pytest.raises(WebSocketDisconnect), client.websocket_connect(
+                f"{API}/{interview_id}/voice", headers=voice_headers(client)):
+                pass
             assert client.get(API).json() == []
             assert client.get(f"{API}/{interview_id}").status_code == 404
             assert client.post(f"{API}/{interview_id}/finish").status_code == 409
